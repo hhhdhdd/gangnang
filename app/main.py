@@ -3,7 +3,16 @@ import logging
 
 from app.bot import build_bot, build_dispatcher
 from app.config import settings
+from app.db import SessionLocal
 from app.handlers import register_handlers
+from app.middlewares import register_middlewares
+from app.services.admins import ensure_owner
+
+
+async def on_startup() -> None:
+    """One-time bootstrap on bot start."""
+    async with SessionLocal() as session:
+        await ensure_owner(session, settings.owner_id)
 
 
 async def main() -> None:
@@ -15,7 +24,10 @@ async def main() -> None:
 
     bot = build_bot()
     dp = build_dispatcher()
+    register_middlewares(dp)
     register_handlers(dp)
+
+    await on_startup()
 
     me = await bot.get_me()
     log.info("Starting bot @%s (id=%s)", me.username, me.id)
