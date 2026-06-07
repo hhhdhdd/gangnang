@@ -171,13 +171,16 @@ def _chat_settings_text(chat: Chat) -> str:
     is_default = chat.prompt_text is None
     prompt_marker = " <i>(дефолт)</i>" if is_default else ""
 
+    autopub = "🟢 авто-публикация для голосования" if chat.auto_publish else "🔴 авто-публикация выключена"
+
     title = html.escape(chat.title or f"chat {chat.chat_id}")
     return (
         f"📋 <b>{title}</b>\n"
         f"🆔 <code>{chat.chat_id}</code>\n"
         f"{status}\n"
         f"⏰ {schedule}\n"
-        f"✏️ {html.escape(plain)}{prompt_marker}"
+        f"✏️ {html.escape(plain)}{prompt_marker}\n"
+        f"🗳 {autopub}"
     )
 
 
@@ -433,4 +436,27 @@ async def cb_prompt_reset(
     await session.commit()
     await state.clear()
     await callback.answer("↩️ Сброшено к дефолту")
+    await _show_chat_settings(callback, session, chat_id)
+
+
+
+
+@router.callback_query(F.data.startswith("chat:autopub:"))
+async def cb_chat_autopub(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    chat_id = int(callback.data.split(":")[2])
+    chat = await session.get(Chat, chat_id)
+    if chat is None:
+        await callback.answer("⚠️ Чат не найден", show_alert=True)
+        return
+    chat.auto_publish = not chat.auto_publish
+    await session.commit()
+    await callback.answer(
+        "🟢 Авто-голосование включено"
+        if chat.auto_publish
+        else "🔴 Авто-голосование выключено"
+    )
     await _show_chat_settings(callback, session, chat_id)

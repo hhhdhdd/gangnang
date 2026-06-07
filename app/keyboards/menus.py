@@ -51,6 +51,11 @@ def chat_settings_keyboard(chat: Chat) -> InlineKeyboardMarkup:
         if chat.is_active
         else InlineKeyboardButton(text="▶️ Возобновить", callback_data=f"chat:resume:{cid}")
     )
+    autopub_label = (
+        "🗳 Авто-голосование: 🟢"
+        if chat.auto_publish
+        else "🗳 Авто-голосование: 🔴"
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -61,6 +66,7 @@ def chat_settings_keyboard(chat: Chat) -> InlineKeyboardMarkup:
                 pause_btn,
                 InlineKeyboardButton(text="📤 Отправить сейчас", callback_data=f"chat:fire:{cid}"),
             ],
+            [InlineKeyboardButton(text=autopub_label, callback_data=f"chat:autopub:{cid}")],
             [InlineKeyboardButton(text="⬅️ К списку", callback_data="chat:list:0")],
         ]
     )
@@ -317,26 +323,52 @@ def ideas_list_keyboard(
 
 
 def idea_view_keyboard(
-    idea_id: int, filter_key: str, page: int
+    idea_id: int,
+    filter_key: str,
+    page: int,
+    *,
+    can_publish: bool = False,
+    is_published: bool = False,
+    vote_up: int = 0,
+    vote_down: int = 0,
 ) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="⭐", callback_data=f"card:star:{idea_id}"),
-                InlineKeyboardButton(text="✅", callback_data=f"card:read:{idea_id}"),
-                InlineKeyboardButton(text="🗑", callback_data=f"card:archive:{idea_id}"),
-            ],
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text="⭐", callback_data=f"card:star:{idea_id}"),
+            InlineKeyboardButton(text="✅", callback_data=f"card:read:{idea_id}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"card:archive:{idea_id}"),
+        ],
+        [
+            InlineKeyboardButton(
+                text="✉️ Ответить автору",
+                callback_data=f"card:reply:{idea_id}",
+            )
+        ],
+    ]
+    if is_published:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    text="✉️ Ответить автору",
-                    callback_data=f"card:reply:{idea_id}",
+                    text=f"📢 Опубликовано · 👍 {vote_up}  👎 {vote_down}",
+                    callback_data=f"card:refresh:{idea_id}",
                 )
-            ],
+            ]
+        )
+    elif can_publish:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    text="⬅️ К списку",
-                    callback_data=f"ideas:list:{filter_key}:{page}",
+                    text="📢 Опубликовать в чат",
+                    callback_data=f"card:publish:{idea_id}",
                 )
-            ],
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ К списку",
+                callback_data=f"ideas:list:{filter_key}:{page}",
+            )
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
