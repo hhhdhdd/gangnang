@@ -28,25 +28,45 @@ def anonymity_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def owner_card_keyboard(idea_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def owner_card_keyboard(
+    idea_id: int,
+    *,
+    can_publish: bool = False,
+    is_published: bool = False,
+    vote_up: int = 0,
+    vote_down: int = 0,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text="⭐", callback_data=f"card:star:{idea_id}"),
+            InlineKeyboardButton(text="✅", callback_data=f"card:read:{idea_id}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"card:archive:{idea_id}"),
+        ],
+        [
+            InlineKeyboardButton(
+                text="✉️ Ответить автору",
+                callback_data=f"card:reply:{idea_id}",
+            )
+        ],
+    ]
+
+    if is_published:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    text="⭐", callback_data=f"card:star:{idea_id}"
-                ),
-                InlineKeyboardButton(
-                    text="✅", callback_data=f"card:read:{idea_id}"
-                ),
-                InlineKeyboardButton(
-                    text="🗑", callback_data=f"card:archive:{idea_id}"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="✉️ Ответить автору",
-                    callback_data=f"card:reply:{idea_id}",
+                    text=f"📢 Опубликовано · 👍 {vote_up}  👎 {vote_down}",
+                    callback_data=f"card:refresh:{idea_id}",
                 )
-            ],
-        ]
-    )
+            ]
+        )
+    elif can_publish:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="📢 Опубликовать в чат",
+                    callback_data=f"card:publish:{idea_id}",
+                )
+            ]
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)

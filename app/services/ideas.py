@@ -151,7 +151,22 @@ async def dispatch_idea_to_admins(
     chat_title: str | None,
 ) -> None:
     text = format_idea_card(idea, chat_title)
-    keyboard = owner_card_keyboard(idea.id)
+    is_published = idea.published_message_id is not None
+    can_publish = (idea.chat_id is not None) and not is_published
+
+    vote_up = vote_down = 0
+    if is_published:
+        from app.services.voting import get_vote_totals
+
+        vote_up, vote_down = await get_vote_totals(session, idea.id)
+
+    keyboard = owner_card_keyboard(
+        idea.id,
+        can_publish=can_publish,
+        is_published=is_published,
+        vote_up=vote_up,
+        vote_down=vote_down,
+    )
     recipients = await get_stream_recipients(session)
     for admin_id in recipients:
         try:

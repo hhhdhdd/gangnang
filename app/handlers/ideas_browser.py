@@ -179,9 +179,26 @@ async def cb_ideas_open(
     body = format_idea_card(idea, chat_title)
     body += _format_meta(idea)
 
+    is_published = idea.published_message_id is not None
+    can_publish = (idea.chat_id is not None) and not is_published
+    up = down = 0
+    if is_published:
+        from app.services.voting import get_vote_totals
+
+        up, down = await get_vote_totals(session, idea.id)
+
     if isinstance(callback.message, Message):
         await callback.message.edit_text(
-            body, reply_markup=idea_view_keyboard(idea.id, filter_key, page)
+            body,
+            reply_markup=idea_view_keyboard(
+                idea.id,
+                filter_key,
+                page,
+                can_publish=can_publish,
+                is_published=is_published,
+                vote_up=up,
+                vote_down=down,
+            ),
         )
     await callback.answer()
 

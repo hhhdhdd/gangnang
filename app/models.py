@@ -1,6 +1,16 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    SmallInteger,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -45,6 +55,9 @@ class Chat(Base):
     last_prompt_message_id: Mapped[int | None] = mapped_column(
         BigInteger, nullable=True
     )
+    auto_publish: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -67,11 +80,35 @@ class Idea(Base):
     is_anonymous: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="new", nullable=False)
     tag: Mapped[str] = mapped_column(String(16), default="other", nullable=False)
+    published_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    published_message_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     chat: Mapped[Chat | None] = relationship(back_populates="ideas")
+    votes: Mapped[list["IdeaVote"]] = relationship(
+        back_populates="idea", cascade="all, delete-orphan"
+    )
+
+
+class IdeaVote(Base):
+    """A single up/down vote by a chat participant on a published idea."""
+
+    __tablename__ = "idea_votes"
+
+    idea_id: Mapped[int] = mapped_column(
+        ForeignKey("ideas.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    value: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    idea: Mapped[Idea] = relationship(back_populates="votes")
 
 
 class Setting(Base):

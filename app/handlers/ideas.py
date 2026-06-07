@@ -188,6 +188,14 @@ async def receive_anonymity(
     )
     await state.clear()
 
+    # Auto-publish for voting if the source chat opted in.
+    if chat_id is not None:
+        chat = await session.get(Chat, chat_id)
+        if chat is not None and chat.auto_publish:
+            from app.services.voting import publish_idea_to_chat
+
+            await publish_idea_to_chat(bot, session, idea, chat)
+
     if isinstance(callback.message, Message):
         await callback.message.edit_text(
             f"✅ Идея #{idea.id} отправлена. Спасибо 🙌"
@@ -256,6 +264,11 @@ async def capture_in_chat_reply(
         tag=DEFAULT_TAG,
     )
 
+    if chat.auto_publish:
+        from app.services.voting import publish_idea_to_chat
+
+        await publish_idea_to_chat(bot, session, idea, chat)
+
     try:
         await message.reply(
             f"✅ Идея #{idea.id} принята. Спасибо!",
@@ -300,6 +313,14 @@ async def owner_card_action(
 
     if action == "reply":
         await _start_reply_flow(callback, session, state, idea_id)
+        return
+
+    if action == "publish":
+        await _publish_idea_action(callback, session)
+        return
+
+    if action == "refresh":
+        await _refresh_idea_card(callback, session)
         return
 
     new_status = STATUS_BY_ACTION.get(action)
@@ -511,3 +532,103 @@ async def cmd_setcron(
         f"✅ Расписание для <b>{chat.title or chat_id}</b>:\n"
         f"<code>{cron_raw}</code>"
     )
+
+
+
+
+# ---------- Owner: publish for voting / refresh tallies ----------
+
+async def _publish_idea_action(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    parts = (callback.data or "").split(":")
+    try:
+        idea_id = int(parts[2])
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+
+    idea = await session.get(Idea, idea_id)
+    if idea is None:
+        await callback.answer("Идея не найдена", show_alert=True)
+        return
+    if idea.chat_id is None:
+        await callback.answer(
+            "Эта идея пришла в ЛС — публиковать некуда.", show_alert=True
+        )
+        return
+    if idea.published_message_id is not None:
+        await callback.answer("Уже опубликовано", show_alert=True)
+        return
+
+    chat = await session.get(Chat, idea.chat_id)
+    if chat is None or not chat.is_active:
+        await callback.answer(
+            "Чат недоступен или на паузе", show_alert=True
+        )
+        return
+
+    from app.services.voting import publish_idea_to_chat
+
+    sent = await publish_idea_to_chat(callback.bot, session, idea, chat)
+    if sent is None:
+        await callback.answer(
+            "⚠️ Не удалось опубликовать (см. логи)", show_alert=True
+        )
+        return
+
+    from app.keyboards.prompt import owner_card_keyboard
+
+    await callback.answer("📢 Опубликовано")
+    if isinstance(callback.message, Message):
+        try:
+            await callback.message.edit_reply_markup(
+                reply_markup=owner_card_keyboard(
+                    idea.id,
+                    can_publish=False,
+                    is_published=True,
+                    vote_up=0,
+                    vote_down=0,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("update card after publish failed: %s", exc)
+
+
+async def _refresh_idea_card(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    parts = (callback.data or "").split(":")
+    try:
+        idea_id = int(parts[2])
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+
+    idea = await session.get(Idea, idea_id)
+    if idea is None:
+        await callback.answer("Идея не найдена", show_alert=True)
+        return
+
+    from app.keyboards.prompt import owner_card_keyboard
+    from app.services.voting import get_vote_totals
+
+    is_published = idea.published_message_id is not None
+    up = down = 0
+    if is_published:
+        up, down = await get_vote_totals(session, idea.id)
+
+    await callback.answer(f"👍 {up}  👎 {down}")
+    if isinstance(callback.message, Message):
+        try:
+            await callback.message.edit_reply_markup(
+                reply_markup=owner_card_keyboard(
+                    idea.id,
+                    can_publish=(idea.chat_id is not None) and not is_published,
+                    is_published=is_published,
+                    vote_up=up,
+                    vote_down=down,
+                )
+            )
+        except Exception:  # noqa: BLE001 — keyboard unchanged is a no-op error
+            pass
