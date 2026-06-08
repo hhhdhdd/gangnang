@@ -1,19 +1,41 @@
-from pydantic import Field
+from urllib.parse import urlparse
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """Bot configuration loaded from environment variables.
+
+    Field names map to env vars case-insensitively, so:
+      bot_token   -> BOT_TOKEN
+      owner_id    -> OWNER_ID
+      database_url-> DATABASE_URL
+      tz          -> TZ
+      log_level   -> LOG_LEVEL
+
+    A local `.env` file is loaded if present, but is not required —
+    on Railway / production the env vars come straight from the service.
+    """
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
+        case_sensitive=False,
         extra="ignore",
     )
 
-    bot_token: str = Field(alias="BOT_TOKEN")
-    owner_id: int = Field(alias="OWNER_ID")
-    database_url: str = Field(alias="DATABASE_URL")
-    tz: str = Field(default="Europe/Kyiv", alias="TZ")
-    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    bot_token: str
+    owner_id: int
+    database_url: str
+    tz: str = "Europe/Kyiv"
+    log_level: str = "INFO"
+
+    # Quiet hours / night mode. Bot suppresses *proactive* messages
+    # (scheduled prompts, broadcasts, reminders) during this window.
+    # Times are HH:MM in the timezone above; window may wrap midnight.
+    quiet_hours_enabled: bool = Field(default=True, alias="QUIET_HOURS_ENABLED")
+    quiet_hours_start: str = Field(default="23:00", alias="QUIET_HOURS_START")
+    quiet_hours_end: str = Field(default="08:00", alias="QUIET_HOURS_END")
 
     @property
     def async_database_url(self) -> str:
@@ -24,6 +46,21 @@ class Settings(BaseSettings):
         elif url.startswith("postgresql://") and "+asyncpg" not in url:
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
         return url
+
+    @property
+    def database_url_masked(self) -> str:
+        """A safe-to-log version of the database URL: scheme, host, port,
+        dbname, masked username (no password)."""
+        try:
+            parsed = urlparse(self.async_database_url)
+        except Exception:  # noqa: BLE001
+            return "<unparseable>"
+        host = parsed.hostname or "?"
+        port = parsed.port or "?"
+        dbname = (parsed.path or "/").lstrip("/") or "?"
+        user_marker = "user" if parsed.username else "(no user)"
+        scheme = parsed.scheme or "?"
+        return f"{scheme}://{user_marker}:***@{host}:{port}/{dbname}"
 
 
 settings = Settings()
