@@ -16,13 +16,20 @@
 | C | Observability + unified `/musicmenu` + simplified OpenRouter + target duration | `[x]` | 7 | 0 | 7 |
 | D | Song-from-chat MVP: `song_pipeline.py` + `/song_now` + кнопка в /musicmenu | `[x]` | 5 | 0 | 5 |
 | E | Scheduled daily song: миграция `chats.song_*`, scheduler-job, headless pipeline, UI расписания | `[~]` | 0 | 4 | 4 |
-| 2 | LLM-абстракция: OpenRouter-клиент, таблица `llm_models`, рантайм-управление через `/menu` | `[ ]` | 0 | 0 | 6 |
-| 3 | Summarizer + songwriter: map-reduce, JSON-парсинг с ретраями, dry-run `/song_test` | `[ ]` | 0 | 0 | 4 |
+| 2 | LLM-абстракция: OpenRouter-клиент, таблица `llm_models`, рантайм-управление через `/menu` | `⛔ superseded (C)` | 1 | 0 | 6 |
+| 3 | Summarizer + songwriter: map-reduce, JSON-парсинг с ретраями, dry-run `/song_test` | `⛔ superseded (D)` | 0 | 0 | 4 |
 | 4 | Song-провайдер + оркестратор: миграция `daily_songs`, SunoApiOrgProvider+SunoSelfHosted+LyricsOnly, `daily_song.py`, `/song_now`, scheduler-job, постинг в чат | `[ ]` | 0 | 0 | 7 |
 | 5 | Полировка: `/song_stats`, `/song_purge`, alert при первом включении, sweep `stale_on_restart` | `[~]` | 1 | 2 | 4 |
 | 6 | Опционально: тесты-смоук, retention-cron, обложка mp3 | `[ ]` | 0 | 0 | 3 |
 
-**Итого**: 30 / 6 / 57
+**Итого**: 31 / 6 / 57
+
+> Из 57 задач **superseded MVP-архитектурой** (Фазы C/D): 9 (вся Фаза 2 кроме
+> 2.4 + вся Фаза 3). **N/A в MVP**: 5.3. **Частично superseded Фазой E**:
+> Фаза 4 (scheduler + постинг сделаны в E; остаются 4.1–4.4 — `daily_songs`,
+> provider-абстракция, dedup — как post-MVP). **Опционально**: Фаза 6 (3).
+> Функционально фича готова: capture → OpenRouter → Suno → постинг, ручной
+> (`/song_now`) и по расписанию (Фаза E).
 
 ## Открытые PR
 
@@ -106,33 +113,52 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
 
 ## Фаза 2 — LLM-абстракция и рантайм-управление моделями
 
-Цель: бот умеет добавлять/активировать/удалять модели OpenRouter через `/menu`, и есть рабочий `OpenRouterClient.chat(...)`. Без summarizer-логики самой.
+> **⛔️ SUPERSEDED Фазой C (PR #28).** MVP пошёл по упрощённому пути: одна
+> активная модель OpenRouter + один system prompt в таблице `settings`
+> (`llm.*`), вместо таблицы `llm_models` с per-role активацией. См.
+> design.md §3.2 «MVP simplification». `OpenRouterClient` (2.4) реализован
+> в `app/services/llm.py`. Задачи 2.1–2.3, 2.5–2.6 (CRUD моделей)
+> **не реализуются** — остаются post-MVP расширением, если упрёмся в
+> качество одной модели. Из burndown исключены (см. сноску у «Итого»).
 
-- [ ] **2.1** Alembic-миграция `20260613_0007_llm_models.py`: таблица `llm_models` (см. design §2.4). `settings`-таблица уже есть, ничего не трогаем.
-- [ ] **2.2** Модель `LlmModel` в `app/models.py`.
-- [ ] **2.3** Сервис `app/services/llm_models.py`: CRUD + `get_active(role)` + `set_active(role, slug)`. Хранение активной модели — в `settings` (`llm.active_summarizer`/`llm.active_songwriter`).
-- [ ] **2.4** Сервис `app/services/llm.py`: `OpenRouterClient` поверх `httpx`. Добавить `httpx==0.27.2` в `requirements.txt`.
-- [ ] **2.5** FSM-стейты `LlmModelAdd`, `LlmModelEditPrompt` в `app/states.py`.
-- [ ] **2.6** UI в `app/handlers/admin_menu.py` (или отдельный `song_admin.py`): новая кнопка «🤖 LLM-модели» в главном меню, экран списка с маркерами активных ролей, добавление/редактирование/удаление по визарду. Callback-префикс `song:model:*`. Запрет удаления активной модели.
+- [ ] **2.1** ~~Alembic-миграция `llm_models`~~ — superseded (settings-based).
+- [ ] **2.2** ~~Модель `LlmModel`~~ — superseded.
+- [ ] **2.3** ~~Сервис `llm_models.py` (CRUD + активация ролей)~~ — superseded.
+- [x] **2.4** Сервис `app/services/llm.py`: `OpenRouterClient` поверх `httpx` + `httpx` в `requirements.txt` — реализовано в Фазе C. _(PR [#28](https://github.com/pavlodrab/ideabottg/pull/28) — merged)_
+- [ ] **2.5** ~~FSM `LlmModelAdd` / `LlmModelEditPrompt`~~ — superseded (есть `LlmApiKeyEditing` / `LlmModelEditing` / `LlmSystemPromptEditing` из Фазы C).
+- [ ] **2.6** ~~UI «🤖 LLM-модели» (CRUD моделей)~~ — superseded меню `🤖 OpenRouter` из Фазы C.
 
-**Definition of done фазы 2**: владелец через DM-меню добавляет модель `meta-llama/llama-3.3-70b-instruct:free`, активирует её на обе роли, и `await get_active("summarizer")` возвращает её. Реальный `OpenRouterClient.chat()` тестируется ручным smoke-тестом владельцем.
+**Definition of done фазы 2**: ~~CRUD моделей через меню~~ — заменено на «один ключ + одна модель + один prompt» через `/musicmenu → 🤖 OpenRouter` (Фаза C).
 
 ---
 
 ## Фаза 3 — Summarizer + songwriter (без Suno)
 
-Цель: на сохранённой истории бот умеет получить `SongDraft` и показать его в ЛС админу через `/song_test`. Suno ещё не подключаем.
+> **⛔️ SUPERSEDED Фазой D (PR #29).** Вместо отдельных map-reduce
+> `song_summarizer.py` + `song_writer.py` MVP делает summarize+songwrite
+> **одним** LLM-вызовом в `app/services/song_pipeline.py::llm_make_song_draft`
+> (с JSON-ретраями и tolerant-парсингом). Dry-run `/song_test` заменён
+> рабочими `/song_now` + кнопкой в `/musicmenu` (Фаза D). Отдельные
+> модули не реализуются — из burndown исключены.
 
-- [ ] **3.1** Сервис `app/services/song_summarizer.py`: `summarize_day` с map-reduce, JSON-парсинг с 2 ретраями.
-- [ ] **3.2** Сервис `app/services/song_writer.py`: `digest_to_song`, дефолтный system-prompt (см. design §3.5).
-- [ ] **3.3** Команда `/song_test <chat_id>` в `song_admin.py`: dry-run, показывает в ЛС: число сообщений, дайджест JSON, SongDraft JSON. Не пишет в `daily_songs`.
-- [ ] **3.4** Smoke-проверка: `/song_test` на чате с накопленной за фазу 1+2 историей. Если сообщений `< SONG_MIN_MESSAGES` — корректное сообщение «недостаточно».
+- [ ] **3.1** ~~`song_summarizer.py` (map-reduce)~~ — superseded `song_pipeline.llm_make_song_draft`.
+- [ ] **3.2** ~~`song_writer.py` (`digest_to_song`)~~ — superseded (тот же единый вызов; songwriter system prompt — в `llm.DEFAULT_SONGWRITER_SYSTEM_PROMPT`).
+- [ ] **3.3** ~~`/song_test` dry-run~~ — superseded `/song_now` + `mm:gen_*` (Фаза D, PR #29).
+- [ ] **3.4** ~~Smoke `/song_test`~~ — superseded (минимум сообщений проверяется в `start_song_generation` → `too_few_messages`).
 
-**Definition of done фазы 3**: `/song_test` для реального чата возвращает валидный SongDraft.
+**Definition of done фазы 3**: ~~`/song_test` возвращает SongDraft~~ — заменено на `/song_now <chat_id>` → реальная песня в чат (Фаза D).
 
 ---
 
 ## Фаза 4 — Song-провайдер + оркестратор + scheduler + постинг
+
+> **Частично реализовано Фазой E (PR #30):** scheduler-job `song:{chat_id}`,
+> постинг mp3 в чат и оркестрация поверх `song_pipeline` — сделаны. Ручной
+> `/song_now` (4.6) — в Фазе D (PR #29). Остаются как **post-MVP**: таблица
+> `daily_songs` (4.1–4.2), provider-абстракция `SongProvider` +
+> `LyricsOnly`/self-hosted (4.3), dedup по `(chat_id, date_msk)` и fallback
+> (часть 4.4), toggle в `chat_settings_keyboard` (4.7 — заменён UI расписания
+> в per-chat `/musicmenu` из Фазы E).
 
 Цель: полный пайплайн работает; cron каждый день в 21:00 MSK постит mp3 в чат.
 
