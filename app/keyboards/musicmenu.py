@@ -1,32 +1,23 @@
 """Inline keyboards + text rendering for the unified ``/musicmenu`` admin home.
 
 When an admin runs ``/musicmenu`` in DM (or any callback returns
-``home``), this is the screen they land on. It pulls together every
-admin-facing section of the bot:
+``home``/``mm:home``), this is the screen they land on — one place for
+every admin-facing setting, grouped into sections:
 
-- Idea / chat / admin management (existing routers).
-- Quiet hours (existing).
-- Music generation: Suno + OpenRouter + per-chat style + target
-  duration + in-bot logs.
-
-Why one big screen?
--------------------
-
-The old top-level ``home_keyboard`` only showed five admin sections
-and required a second tap to reach Suno. With OpenRouter on top, log
-viewer, and target duration to add, two-tap-to-most-things became the
-common case. Lifting the keys + indicators (🟢/🔴) one level up makes
-the bot's state legible at a glance.
+  🎵 Генерация — Suno · OpenRouter · длительность · стили · «сейчас»
+  🗂 Песни     — архив всех песен · статистика генераций
+  ⚙️ Управление — чаты · идеи · админы · тишина · логи
 
 Callback-data namespace
 -----------------------
 
-``mm:*`` for entries owned by this screen (``mm:home``, ``mm:styles``).
-The buttons that open existing sections re-use those sections' own
-namespaces (``suno:home``, ``llm:home``, ``logs:home``, ``qh:open``,
-``ideas:filter:new``, ``admin:list``, ``chat:list:0``) — so a tap on
-"Suno API" goes directly into the existing Suno admin handler with no
-extra plumbing.
+``mm:*`` for entries owned by this screen (``mm:home``, ``mm:styles``,
+``mm:gen_pick``, ``mm:archive``, ``mm:stats``). Buttons that open
+existing sections re-use those sections' own namespaces
+(``suno:home``, ``llm:home``, ``logs:home``, ``qh:open``,
+``ideas:filter:new``, ``admin:list``, ``chat:list:0``,
+``suno:duration_open``) so a tap goes straight into the existing
+handler with no extra plumbing.
 """
 from __future__ import annotations
 
@@ -46,12 +37,12 @@ def musicmenu_home_keyboard(
     llm_model_label: str,
     target_duration_label: str,
 ) -> InlineKeyboardMarkup:
-    """Render the unified admin home keyboard.
+    """Unified admin home keyboard, grouped into the three sections
+    mirrored by :func:`render_musicmenu_home_text`.
 
-    The 🟢/🔴 indicators are computed from whether each provider has an
-    API key set in the DB — that's the only piece of state that can
-    cause day-to-day "why isn't generation working" surprises, so it's
-    worth surfacing on the entry screen.
+    The 🟢/🔴 indicators on Suno / OpenRouter reflect whether each
+    provider's API key is set — the one bit of state that silently
+    breaks generation, so it's surfaced on the entry screen.
     """
     suno_label = (
         f"🎚 Suno · {'🟢' if suno_ok else '🔴'} · {suno_model}"
@@ -61,7 +52,37 @@ def musicmenu_home_keyboard(
     )[:64]
 
     rows: list[list[InlineKeyboardButton]] = [
-        # Existing admin sections (top of screen).
+        # ── 🎵 Генерация песен ──
+        [InlineKeyboardButton(text=suno_label, callback_data="suno:home")],
+        [InlineKeyboardButton(text=llm_label, callback_data="llm:home")],
+        [
+            InlineKeyboardButton(
+                text=f"🎯 Длительность · {target_duration_label}",
+                callback_data="suno:duration_open",
+            ),
+            InlineKeyboardButton(
+                text="🎼 Стили чатов",
+                callback_data="mm:styles",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🎵 Сгенерировать песню дня",
+                callback_data="mm:gen_pick",
+            ),
+        ],
+        # ── 🗂 Песни ──
+        [
+            InlineKeyboardButton(
+                text="🎼 Архив песен",
+                callback_data="mm:archive",
+            ),
+            InlineKeyboardButton(
+                text="📊 Статистика",
+                callback_data="mm:stats",
+            ),
+        ],
+        # ── ⚙️ Управление ботом ──
         [
             InlineKeyboardButton(
                 text=f"📋 Чаты ({chat_count})",
@@ -82,37 +103,6 @@ def musicmenu_home_keyboard(
             InlineKeyboardButton(text="🌙 Тишина", callback_data="qh:open"),
             InlineKeyboardButton(text="📜 Логи", callback_data="logs:home"),
         ],
-        # Music generation block. Visually separated by the section
-        # heading rendered in the message body (see
-        # :func:`render_musicmenu_home_text`).
-        [
-            InlineKeyboardButton(text=suno_label, callback_data="suno:home"),
-        ],
-        [
-            InlineKeyboardButton(text=llm_label, callback_data="llm:home"),
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"🎯 Длительность · {target_duration_label}",
-                callback_data="suno:duration_open",
-            ),
-            InlineKeyboardButton(
-                text="🎼 Стили чатов",
-                callback_data="mm:styles",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="🎵 Сгенерировать песню дня",
-                callback_data="mm:gen_pick",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="🎵 Архив песен",
-                callback_data="mm:archive",
-            ),
-        ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -127,23 +117,31 @@ def render_musicmenu_home_text(
     llm_model_label: str,
     target_duration_label: str,
 ) -> str:
-    """Body text shown above the keyboard.
-
-    Mirrors what's encoded in the buttons but in human-readable form so
-    admins don't have to decode emoji to know if the bot is "ready".
-    """
+    """Body text above the keyboard, grouped into the same sections as
+    the buttons so the screen reads top-to-bottom."""
     suno_status = "🟢 ключ задан" if suno_ok else "🔴 нет ключа"
     llm_status = "🟢 ключ задан" if llm_ok else "🔴 нет ключа"
+    ready_line = (
+        "✅ Всё готово к генерации."
+        if (suno_ok and llm_ok)
+        else "⚠️ Для генерации нужны оба ключа (Suno + OpenRouter)."
+    )
     return (
-        "🎵 <b>Управление ботом</b>\n\n"
-        f"📋 Чатов: <b>{chat_count}</b>  ·  👥 Админов: <b>{admin_count}</b>\n\n"
-        "──────────  Генерация песни  ──────────\n"
-        f"🎚 <b>Suno</b> · {suno_status} · модель <code>"
-        f"{html.escape(suno_model)}</code>\n"
-        f"🤖 <b>OpenRouter</b> · {llm_status} · модель <code>"
-        f"{html.escape(llm_model_label)}</code>\n"
+        "🎵 <b>Музыкальное меню — управление ботом</b>\n"
+        f"{ready_line}\n\n"
+        "━━━━━━  🎵 Генерация  ━━━━━━\n"
+        f"🎚 <b>Suno</b> · {suno_status} · "
+        f"<code>{html.escape(suno_model)}</code>\n"
+        f"🤖 <b>OpenRouter</b> · {llm_status} · "
+        f"<code>{html.escape(llm_model_label)}</code>\n"
         f"🎯 <b>Длительность</b> · "
-        f"<code>{html.escape(target_duration_label)}</code>\n\n"
+        f"<code>{html.escape(target_duration_label)}</code>\n"
+        "🎼 Стиль — отдельно для каждого чата\n\n"
+        "━━━━━━  🗂 Песни  ━━━━━━\n"
+        "Архив всех песен · статистика генераций\n\n"
+        "━━━━━━  ⚙️ Управление  ━━━━━━\n"
+        f"📋 Чатов: <b>{chat_count}</b>  ·  👥 Админов: <b>{admin_count}</b>\n"
+        "Идеи · тишина · логи\n\n"
         "Тапни раздел ниже 👇"
     )
 
@@ -152,10 +150,8 @@ def musicmenu_styles_keyboard(
     chats: Iterable,
 ) -> InlineKeyboardMarkup:
     """Chat picker for "🎼 Стили чатов" — opens
-    :func:`app.keyboards.music.music_menu_keyboard` for the chosen chat.
-
-    Re-uses the existing ``music:menu_open:<chat_id>`` callback, which
-    is already handled by :func:`app.handlers.music.cb_music_menu_open`.
+    :func:`app.keyboards.music.music_menu_keyboard` for the chosen chat
+    via the existing ``music:menu_open:<chat_id>`` callback.
     """
     rows: list[list[InlineKeyboardButton]] = []
     for chat in chats:
@@ -170,10 +166,15 @@ def musicmenu_styles_keyboard(
             ]
         )
     rows.append(
-        [
-            InlineKeyboardButton(
-                text="⬅️ Назад", callback_data="mm:home"
-            )
-        ]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="mm:home")]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def musicmenu_back_keyboard() -> InlineKeyboardMarkup:
+    """Single ⬅️ back-to-home button (used by inline sub-views like stats)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="mm:home")]
+        ]
+    )
