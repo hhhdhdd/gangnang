@@ -28,12 +28,14 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.keyboards.musicmenu import (
+    musicmenu_back_keyboard,
     musicmenu_home_keyboard,
     musicmenu_styles_keyboard,
     render_musicmenu_home_text,
 )
 from app.services.admins import is_admin, list_admins
 from app.services.chats import list_chats
+from app.services.songs import song_stats
 from app.services.llm import (
     MODEL_LABEL_BY_SLUG as LLM_MODEL_LABEL_BY_SLUG,
     get_api_key as get_llm_api_key,
@@ -203,6 +205,46 @@ async def cb_mm_styles(
                 "будет использовать настройку, которую ты тут "
                 "поставишь.",
                 reply_markup=musicmenu_styles_keyboard(chats),
+            )
+    await callback.answer()
+
+
+# ---------- mm:stats — generation stats inline ----------
+
+@router.callback_query(F.data == "mm:stats")
+async def cb_mm_stats(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    """Show song-generation stats inline (same data as /song_stats)."""
+    if not await _require_admin(callback, session):
+        return
+    stats = await song_stats(session, days=30)
+    lines = [
+        "📊 <b>Статистика песен</b>",
+        "",
+        f"🎵 Всего: <b>{stats['total']}</b>",
+        f"🗓 За {stats['days']} дней: <b>{stats['recent']}</b>",
+    ]
+    if stats["by_chat"]:
+        lines.append("")
+        lines.append("<b>По чатам (за период):</b>")
+        for chat_id, count in stats["by_chat"]:
+            label = "—" if chat_id is None else f"<code>{chat_id}</code>"
+            lines.append(f"• {label}: {count}")
+    non_success = [
+        (st, c) for st, c in stats["by_status"] if st != "success"
+    ]
+    if non_success:
+        lines.append("")
+        lines.append("<b>Не-success (за период):</b>")
+        for st, count in non_success:
+            lines.append(f"• <code>{st}</code>: {count}")
+
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(
+                "\n".join(lines),
+                reply_markup=musicmenu_back_keyboard(),
             )
     await callback.answer()
 
