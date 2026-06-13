@@ -28,7 +28,7 @@
 
 | PR | Ветка | Фаза | Описание |
 |----|-------|------|----------|
-| _TBD_ | `feat/scheduled-daily-song` | E | автоматическая «Песня дня» по расписанию: per-chat opt-in + cron-job поверх `song_pipeline`, UI расписания в per-chat `/musicmenu` |
+| [#30](https://github.com/pavlodrab/ideabottg/pull/30) | `feat/scheduled-daily-song` | E | автоматическая «Песня дня» по расписанию: per-chat opt-in + cron-job поверх `song_pipeline`, UI расписания в per-chat `/musicmenu` |
 
 ---
 
@@ -301,7 +301,7 @@ MVP без scheduler — только manual trigger из меню или ком
 
 ## Фаза E — Scheduled daily song (автогенерация по расписанию)
 
-> **Все задачи ниже — в открытом PR (`feat/scheduled-daily-song`).** После мерджа маркеры переключаются `[~]` → `[x]`.
+> **Все задачи ниже — в [PR #30](https://github.com/pavlodrab/ideabottg/pull/30)** (`feat/scheduled-daily-song`). После мерджа маркеры переключаются `[~]` → `[x]`.
 
 Достраивает над manual-триггером из Фазы D автоматическую ежедневную
 генерацию: каждый opt-in чат получает cron-job, который раз в день
