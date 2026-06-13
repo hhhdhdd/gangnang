@@ -143,6 +143,22 @@ async def count_songs_for_chat(session: AsyncSession, chat_id: int) -> int:
     return int(result.scalar() or 0)
 
 
+async def count_songs_for_chat_since(
+    session: AsyncSession, chat_id: int, since
+) -> int:
+    """Successful songs for a chat created at/after ``since`` (UTC).
+
+    Used by the per-chat ``/music`` daily quota — counts everything the
+    chat produced today (manual ``/music`` + scheduled daily song)."""
+    stmt = select(func.count(Song.id)).where(
+        Song.chat_id == chat_id,
+        Song.status == VISIBLE_STATUS,
+        Song.created_at >= since,
+    )
+    result = await session.execute(stmt)
+    return int(result.scalar() or 0)
+
+
 async def list_songs_for_user(
     session: AsyncSession,
     user_id: int,

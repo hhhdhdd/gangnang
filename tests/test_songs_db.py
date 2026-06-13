@@ -100,7 +100,21 @@ async def test_song_stats_counts(session):
 
 
 @pytest.mark.asyncio
-async def test_purge_chat_history(session):
+async def test_count_songs_for_chat_since(session):
+    from datetime import datetime, timedelta
+
+    from app.services.songs import count_songs_for_chat_since
+
+    await _add_chat(session, 400)
+    now = datetime.utcnow()
+    session.add(_song(400, "c1", now))
+    session.add(_song(400, "c2", now))
+    session.add(_song(400, "c3", now - timedelta(days=2)))  # old
+    session.add(_song(400, "c4", now, status="failed"))     # not success
+    await session.commit()
+
+    since = now - timedelta(hours=24)
+    assert await count_songs_for_chat_since(session, 400, since) == 2
     await _add_chat(session, 300)
     for i in range(3):
         session.add(

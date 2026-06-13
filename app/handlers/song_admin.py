@@ -27,6 +27,8 @@ import html
 import logging
 import re
 import time
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
@@ -44,7 +46,7 @@ from app.models import Chat
 from app.services.admins import is_admin, is_owner
 from app.services.chats import list_chats
 from app.services.chat_messages import count_messages, purge_chat_history
-from app.services.songs import song_stats
+from app.services.songs import count_songs_for_chat_since, song_stats
 from app.services.song_pipeline import (
     DEFAULT_MIN_MESSAGES,
     SongPipelineError,
@@ -67,7 +69,40 @@ router = Router(name="song_admin")
 MUSIC_COOLDOWN_SEC = 180
 # Hard cap on the user's prompt length before the LLM call.
 MUSIC_MAX_LEN = 800
+# Per-chat daily cap on /music songs (counts everything the chat
+# produced today — manual /music + scheduled daily song). Caps total
+# Suno spend per chat regardless of how many users pile in.
+MUSIC_CHAT_DAILY_LIMIT = 3
 _last_music_at: dict[int, float] = {}
+# In-flight /music generations per chat (the Song row only lands ~3 min
+# later, so the persisted count alone would let a burst slip through).
+_inflight_by_chat: dict[int, int] = {}
+
+
+def _inc_inflight(chat_id: int) -> None:
+    _inflight_by_chat[chat_id] = _inflight_by_chat.get(chat_id, 0) + 1
+
+
+def _dec_inflight(chat_id: int) -> None:
+    n = _inflight_by_chat.get(chat_id, 0) - 1
+    if n > 0:
+        _inflight_by_chat[chat_id] = n
+    else:
+        _inflight_by_chat.pop(chat_id, None)
+
+
+async def _chat_songs_today(session: AsyncSession, chat_id: int) -> int:
+    """Songs already produced for this chat today (calendar day in the
+    bot's TZ), persisted + in-flight."""
+    tz = ZoneInfo(settings.tz)
+    day_start_local = datetime.now(tz).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    day_start_utc = day_start_local.astimezone(timezone.utc)
+    persisted = await count_songs_for_chat_since(
+        session, chat_id, day_start_utc
+    )
+    return persisted + _inflight_by_chat.get(chat_id, 0)
 
 # Matches a trailing style marker: "... стиль панк" / "... в стиле lo-fi"
 # / "... style punk". The part before the marker is the lyric idea.
@@ -336,6 +371,19 @@ async def cmd_music(
         )
         return
 
+    is_group = message.chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}
+
+    # Per-chat daily quota (groups only — DM songs aren't chat-scoped).
+    if is_group:
+        produced = await _chat_songs_today(session, message.chat.id)
+        if produced >= MUSIC_CHAT_DAILY_LIMIT:
+            await message.answer(
+                f"🚫 В этом чате уже сделано {MUSIC_CHAT_DAILY_LIMIT} "
+                f"песни за сегодня — это лимит на чат "
+                f"({MUSIC_CHAT_DAILY_LIMIT}/день). Загляни завтра."
+            )
+            return
+
     # Per-user cooldown.
     now = time.monotonic()
     last = _last_music_at.get(user.id)
@@ -348,6 +396,11 @@ async def cmd_music(
     _last_music_at[user.id] = now
 
     idea, style = parse_music_command(raw)
+
+    # Reserve an in-flight slot so a burst can't blow past the chat cap
+    # before the first Song row is persisted (~3 min later).
+    if is_group:
+        _inc_inflight(message.chat.id)
 
     placeholder = await message.answer(
         "⏳ <b>Готовлю песню по твоему тексту…</b>\n"
@@ -364,6 +417,8 @@ async def cmd_music(
         )
     except SongPipelineError as exc:
         _last_music_at.pop(user.id, None)  # allow immediate retry after fix
+        if is_group:
+            _dec_inflight(message.chat.id)
         with contextlib.suppress(Exception):
             await placeholder.edit_text(
                 f"❌ <b>Не получилось.</b>\n\n{html.escape(exc.humanized())}"
@@ -371,6 +426,8 @@ async def cmd_music(
         return
     except Exception as exc:  # noqa: BLE001
         _last_music_at.pop(user.id, None)
+        if is_group:
+            _dec_inflight(message.chat.id)
         log.exception("music: unexpected error for user %s", user.id)
         with contextlib.suppress(Exception):
             await placeholder.edit_text(
@@ -391,15 +448,17 @@ async def cmd_music(
 
     suno_key = await get_suno_api_key(session)
     if not suno_key:
+        if is_group:
+            _dec_inflight(message.chat.id)
         with contextlib.suppress(Exception):
             await placeholder.edit_text("❌ Suno-ключ исчез после старта.")
         return
 
     # Group songs are tied to the chat; DM songs aren't (chat_id_for_song
     # must be a registered chat FK or None).
-    is_group = message.chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}
     asyncio.create_task(
-        watch_suno_task(
+        _music_watch_and_release(
+            release_chat_id=message.chat.id if is_group else None,
             bot=bot,
             api_key=suno_key,
             task_id=result.suno_task_id,
@@ -416,6 +475,18 @@ async def cmd_music(
         ),
         name=f"music:{result.suno_task_id}",
     )
+
+
+async def _music_watch_and_release(
+    *, release_chat_id: int | None, **watch_kwargs
+) -> None:
+    """Run the Suno poll/delivery, then release the in-flight slot for
+    the chat (so the per-chat daily cap reflects finished generations)."""
+    try:
+        await watch_suno_task(**watch_kwargs)
+    finally:
+        if release_chat_id is not None:
+            _dec_inflight(release_chat_id)
 
 
 # ---------- /song_now ----------

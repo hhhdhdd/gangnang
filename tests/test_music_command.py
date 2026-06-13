@@ -46,3 +46,26 @@ def test_build_prompt_user_message_without_style():
     msg = _build_prompt_user_message("привет мир", 150, None)
     assert "привет мир" in msg
     assert "выбери САМ" in msg
+
+
+def test_inflight_counter_inc_dec():
+    from app.handlers import song_admin as sa
+
+    sa._inflight_by_chat.clear()
+    sa._inc_inflight(555)
+    sa._inc_inflight(555)
+    assert sa._inflight_by_chat[555] == 2
+    sa._dec_inflight(555)
+    assert sa._inflight_by_chat[555] == 1
+    sa._dec_inflight(555)
+    # drops to 0 -> key removed
+    assert 555 not in sa._inflight_by_chat
+    # extra dec is harmless
+    sa._dec_inflight(555)
+    assert 555 not in sa._inflight_by_chat
+
+
+def test_music_chat_daily_limit_constant():
+    from app.handlers import song_admin as sa
+
+    assert sa.MUSIC_CHAT_DAILY_LIMIT == 3

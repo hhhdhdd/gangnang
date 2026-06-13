@@ -21,10 +21,10 @@
 | 4 | Song-провайдер + оркестратор: миграция `daily_songs`, SunoApiOrgProvider+LyricsOnly, `daily_song.py`, `/song_now`, scheduler-job, постинг в чат | `[~]` | 1 | 6 | 7 |
 | 5 | Полировка: `/song_stats`, `/song_purge`, alert при первом включении, sweep `stale_on_restart` | `[~]` | 1 | 3 | 4 |
 | F | Dedup по дню + LyricsOnly fallback + обложка mp3 + pytest smoke-сьют | `[~]` | 0 | 4 | 4 |
-| H | Публичная `/music <текст> [стиль]`: LLM улучшает рифмы + Suno, песня в чат | `[~]` | 0 | 3 | 3 |
+| H | Публичная `/music <текст> [стиль]`: LLM улучшает рифмы + Suno, песня в чат | `[~]` | 0 | 4 | 4 |
 | 6 | Опционально: тесты-смоук, retention-cron, обложка mp3 | `[ ]` | 0 | 0 | 3 |
 
-**Итого**: 32 / 20 / 64
+**Итого**: 32 / 21 / 65
 
 > Из 61 задачи **superseded MVP-архитектурой** (Фазы C/D): 9 (вся Фаза 2 кроме
 > 2.4 + вся Фаза 3). **N/A**: 6.2 (retention уже 2 дня). Остальное реализовано
@@ -417,11 +417,13 @@ OpenRouter (причёсывает рифмы, добавляет структу
 - [~] **H.1** `song_pipeline`: вынесен общий `_llm_draft_with_retries`; добавлены `_build_prompt_user_message`, `prompt_to_song_draft` (улучшение текста → `SongDraft`) и сервис `start_song_from_prompt` (ключи → LLM → Suno submit). _(PR [#34](https://github.com/pavlodrab/ideabottg/pull/34))_
 - [~] **H.2** `app/handlers/song_admin.py::cmd_music` — публичная `/music` (group + DM, без admin-gate): `parse_music_command` (маркеры `стиль` / `в стиле` / `style`), per-user in-memory cooldown (180 c) + лимит длины 800, placeholder → `watch_suno_task` (mp3 в тот же чат, обложка/lyrics/fallback из общего кода). _(PR [#34](https://github.com/pavlodrab/ideabottg/pull/34))_
 - [~] **H.3** Тесты `tests/test_music_command.py`: парсер стиля (incl. last-marker / no-idea кейсы) + содержимое prompt-сообщения. _(PR [#34](https://github.com/pavlodrab/ideabottg/pull/34))_
+- [~] **H.4** Лимит на чат: не больше `MUSIC_CHAT_DAILY_LIMIT=3` песен на чат в сутки (calendar day в `settings.tz`). Считается persisted (`count_songs_for_chat_since`) + in-flight (`_inflight_by_chat`, т.к. `Song` пишется только через ~3 мин). Лимит — только для групп; в ЛС остаётся per-user cooldown. Тесты на счётчик и in-flight хелперы. _(PR [#34](https://github.com/pavlodrab/ideabottg/pull/34))_
 
 **Definition of done фазы H**:
 1. `/music Андрюха крутой стиль панк` → через 2–3 мин mp3 в чате, стиль панк.
 2. `/music песня про субботнее утро` (без стиля) → LLM сам подбирает стиль, рифмы причёсаны.
-3. Спам ограничен кулдауном; при отказе (нет ключа / ошибка) кулдаун сбрасывается, юзер видит причину.
+3. Спам ограничен per-user cooldown'ом; при отказе (нет ключа / ошибка) кулдаун сбрасывается, юзер видит причину.
+4. После 3 песен за сутки в чате `/music` отвечает «лимит на чат 3/день», пока не наступит новый день.
 
 ---
 
