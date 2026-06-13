@@ -7,7 +7,6 @@ from app.handlers import (
     common,
     ideas,
     ideas_browser,
-    quiet_hours,
     voting,
 )
 
@@ -19,6 +18,5 @@ def register_handlers(dp: Dispatcher) -> None:
     dp.include_router(voting.router)
     dp.include_router(admin_menu.router)
     dp.include_router(admin_users.router)
-    dp.include_router(quiet_hours.router)
     dp.include_router(chats.router)
     dp.include_router(common.router)
