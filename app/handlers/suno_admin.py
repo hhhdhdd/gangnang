@@ -21,31 +21,41 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import SessionLocal
 from app.keyboards.suno import (
     suno_back_keyboard,
+    suno_duration_keyboard,
     suno_menu_keyboard,
     suno_model_keyboard,
     suno_remove_key_confirm_keyboard,
 )
 from app.services.admins import is_admin
-from app.services.songs import set_tg_file_id, upsert_song
+from app.services.song_pipeline import watch_suno_task
 from app.services.suno import (
     DEFAULT_CALLBACK_URL,
+    DURATION_PRESETS_SEC,
+    MAX_TARGET_DURATION_SEC,
+    MIN_TARGET_DURATION_SEC,
     MODEL_LABELS,
     SUPPORTED_MODELS,
     SunoApiError,
     SunoApiOrgClient,
-    TaskSnapshot,
+    append_duration_hint,
     clear_api_key,
+    format_duration_label,
     get_api_key,
     get_callback_url,
     get_model,
+    get_target_duration_sec,
     mask_key,
     set_api_key,
     set_model,
+    set_target_duration_sec,
 )
-from app.states import SunoApiKeyEditing, SunoTestPrompt
+from app.states import (
+    SunoApiKeyEditing,
+    SunoDurationCustom,
+    SunoTestPrompt,
+)
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +109,7 @@ async def _build_menu(session: AsyncSession) -> tuple[str, object]:
     api_key = await get_api_key(session)
     model = await get_model(session)
     callback_url = await get_callback_url(session)
+    target_duration = await get_target_duration_sec(session)
 
     masked = mask_key(api_key)
     if api_key:
@@ -118,12 +129,16 @@ async def _build_menu(session: AsyncSession) -> tuple[str, object]:
         "🎵 <b>Suno API</b>  · <code>sunoapi.org</code>\n\n"
         f"{status_line}\n"
         f"🎚 Модель по умолчанию: <code>{html.escape(model)}</code>\n"
+        f"🎯 Целевая длительность: <code>"
+        f"{format_duration_label(target_duration)}</code> "
+        f"(~{target_duration} сек)\n"
         f"🔁 Callback URL: <code>{html.escape(callback_url)}</code>\n\n"
         f"{hint}"
     )
     kb = suno_menu_keyboard(
         has_api_key=bool(api_key),
         current_model=model,
+        target_duration_sec=target_duration,
     )
     return text, kb
 
@@ -332,6 +347,109 @@ async def cb_suno_model_set(
         await callback.message.edit_text(text, reply_markup=kb)
 
 
+# ---------- duration picker ----------
+
+@router.callback_query(F.data == "suno:duration_open")
+async def cb_suno_duration_open(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    current = await get_target_duration_sec(session)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "🎯 <b>Целевая длительность песни</b>\n\n"
+            f"Сейчас: <code>{format_duration_label(current)}</code> "
+            f"(~{current} сек)\n\n"
+            "Suno не принимает параметр «длительность» напрямую — "
+            "вместо этого бот добавляет к prompt подсказку "
+            "<code>[Length: ~M:SS]</code> и просит модель уложиться в "
+            "1 куплет + припев + 1 куплет. Эффект статистический: "
+            "модели V4_5+ / V4_5all чаще попадают в цель.\n\n"
+            "Выбери пресет или задай своё значение:",
+            reply_markup=suno_duration_keyboard(current),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("suno:duration_set:"))
+async def cb_suno_duration_set(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    parts = (callback.data or "").split(":", 2)
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    try:
+        seconds = int(parts[2])
+    except ValueError:
+        await callback.answer("⚠️ Неверное значение", show_alert=True)
+        return
+    stored = await set_target_duration_sec(session, seconds)
+    await callback.answer(f"✅ {format_duration_label(stored)}")
+    text, kb = await _build_menu(session)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "suno:duration_custom")
+async def cb_suno_duration_custom(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    await state.set_state(SunoDurationCustom.waiting_seconds)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "✏️ <b>Своё значение длительности</b>\n\n"
+            f"Пришли число секунд от {MIN_TARGET_DURATION_SEC} до "
+            f"{MAX_TARGET_DURATION_SEC}.\n\n"
+            "Примеры:\n"
+            "• <code>120</code> — 2:00\n"
+            "• <code>180</code> — 3:00\n"
+            "• <code>210</code> — 3:30\n\n"
+            "Или /cancel.",
+            reply_markup=suno_back_keyboard(),
+        )
+    await callback.answer()
+
+
+@router.message(
+    SunoDurationCustom.waiting_seconds,
+    F.chat.type == ChatType.PRIVATE,
+    F.text,
+)
+async def receive_duration_custom(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    raw = (message.text or "").strip()
+    if raw.startswith("/"):
+        return
+    try:
+        seconds = int(raw)
+    except ValueError:
+        await message.answer(
+            "⚠️ Не число. Пришли целое число секунд или /cancel."
+        )
+        return
+    if not (MIN_TARGET_DURATION_SEC <= seconds <= MAX_TARGET_DURATION_SEC):
+        await message.answer(
+            f"⚠️ Вне диапазона [{MIN_TARGET_DURATION_SEC}, "
+            f"{MAX_TARGET_DURATION_SEC}]. Или /cancel."
+        )
+        return
+    stored = await set_target_duration_sec(session, seconds)
+    await state.clear()
+    text, kb = await _build_menu(session)
+    await message.answer(
+        f"✅ Длительность сохранена: "
+        f"<code>{format_duration_label(stored)}</code>\n\n" + text,
+        reply_markup=kb,
+    )
+
+
 # ---------- test generation ----------
 
 @router.callback_query(F.data == "suno:gen_open")
@@ -394,11 +512,18 @@ async def receive_test_prompt(
 
     model = await get_model(session)
     callback_url = await get_callback_url(session)
+    target_duration_sec = await get_target_duration_sec(session)
+
+    # Append a length-hint to the user's prompt so Suno aims at the
+    # configured target duration instead of the model's natural ceiling
+    # (which on V4 is 4 minutes and on V4_5+/all is 8). Idempotent — a
+    # prompt that already contains "[Length:" is not re-tagged.
+    final_prompt = append_duration_hint(text, target_duration_sec)
 
     client = SunoApiOrgClient(api_key)
     try:
         task_id = await client.generate_music(
-            prompt=text,
+            prompt=final_prompt,
             model=model,
             callback_url=callback_url,
             custom_mode=False,
@@ -418,25 +543,32 @@ async def receive_test_prompt(
         "🎵 <b>Задача отправлена</b>\n\n"
         f"🆔 <code>{html.escape(task_id)}</code>\n"
         f"🎚 Модель: <code>{html.escape(model)}</code>\n"
+        f"🎯 Цель: <code>{format_duration_label(target_duration_sec)}</code>\n"
         "⏳ Жду готовности (обычно 2–3 минуты)…\n\n"
         "Можно в любой момент проверить вручную:\n"
         f"<code>/suno_status {html.escape(task_id)}</code>"
     )
 
     asyncio.create_task(
-        _watch_task(
+        watch_suno_task(
             bot=bot,
             api_key=api_key,
             task_id=task_id,
-            notify_chat_id=sent.chat.id,
-            notify_message_id=sent.message_id,
+            placeholder_chat_id=sent.chat.id,
+            placeholder_message_id=sent.message_id,
+            audio_chat_id=sent.chat.id,
             requested_by=message.from_user.id if message.from_user else None,
-            model=model,
-            prompt=text,
+            suno_model=model,
+            prompt=final_prompt,
         ),
         name=f"suno-watch:{task_id}",
     )
 
+
+# ----- legacy alias kept for any external callers -----
+# (Tests / external scripts occasionally import private helpers. The
+# real implementation moved to ``app.services.song_pipeline`` so the
+# daily-song flow can re-use it.)
 
 async def _watch_task(
     *,
@@ -449,176 +581,17 @@ async def _watch_task(
     model: str,
     prompt: str,
 ) -> None:
-    """Background poller: polls Suno every TEST_GEN_POLL_INTERVAL_SEC,
-    edits the placeholder and (on success) persists a ``Song`` row +
-    delivers the mp3 to the user.
-
-    Persisting happens in a fresh ``SessionLocal()`` because this runs
-    outside the request lifecycle — middleware-injected sessions only
-    live for the duration of the originating handler.
-    """
-    client = SunoApiOrgClient(api_key)
-    deadline = TEST_GEN_TIMEOUT_SEC
-    elapsed = 0
-    last_snapshot: TaskSnapshot | None = None
-
-    while elapsed < deadline:
-        await asyncio.sleep(TEST_GEN_POLL_INTERVAL_SEC)
-        elapsed += TEST_GEN_POLL_INTERVAL_SEC
-
-        try:
-            snapshot = await client.get_task(task_id)
-        except SunoApiError as exc:
-            log.warning("suno watch %s poll error: %s", task_id, exc)
-            continue
-        except Exception as exc:  # noqa: BLE001
-            log.exception("suno watch %s unexpected: %s", task_id, exc)
-            continue
-
-        last_snapshot = snapshot
-
-        if snapshot.is_terminal:
-            await _handle_terminal(
-                bot,
-                notify_chat_id,
-                notify_message_id,
-                task_id,
-                snapshot,
-                requested_by=requested_by,
-                model=model,
-                prompt=prompt,
-            )
-            return
-
-    # Timed out.
-    msg = (
-        f"⏰ <b>Тайм-аут.</b> Задача всё ещё не готова за "
-        f"{TEST_GEN_TIMEOUT_SEC // 60} минут.\n\n"
-        f"🆔 <code>{html.escape(task_id)}</code>\n"
-        f"📊 Последний статус: <code>"
-        f"{html.escape(last_snapshot.status if last_snapshot else 'неизвестно')}"
-        f"</code>\n\n"
-        f"Можно подождать и проверить руками:\n"
-        f"<code>/suno_status {html.escape(task_id)}</code>"
+    await watch_suno_task(
+        bot=bot,
+        api_key=api_key,
+        task_id=task_id,
+        placeholder_chat_id=notify_chat_id,
+        placeholder_message_id=notify_message_id,
+        audio_chat_id=notify_chat_id,
+        requested_by=requested_by,
+        suno_model=model,
+        prompt=prompt,
     )
-    with contextlib.suppress(Exception):
-        await bot.edit_message_text(
-            msg, chat_id=notify_chat_id, message_id=notify_message_id
-        )
-
-
-async def _handle_terminal(
-    bot: Bot,
-    chat_id: int,
-    message_id: int,
-    task_id: str,
-    snapshot: TaskSnapshot,
-    *,
-    requested_by: int | None,
-    model: str,
-    prompt: str,
-) -> None:
-    """Edit the placeholder, persist a ``Song`` row on success, and
-    deliver the mp3. On first ``send_audio`` we capture Telegram's
-    permanent ``file_id`` so the song stays playable from /musiclist
-    long after Suno's 15-day mp3 retention expires.
-    """
-    if snapshot.is_success:
-        # 1. Persist Song row first (so /musiclist can find it even if
-        # the audio delivery below fails for any reason).
-        song_id: int | None = None
-        try:
-            async with SessionLocal() as session:
-                song = await upsert_song(
-                    session,
-                    suno_task_id=task_id,
-                    model=model,
-                    prompt=prompt,
-                    title=snapshot.title,
-                    audio_url=snapshot.audio_url,
-                    stream_url=snapshot.stream_url,
-                    image_url=snapshot.image_url,
-                    duration=snapshot.duration,
-                    requested_by=requested_by,
-                    status="success",
-                )
-                song_id = song.id
-        except Exception:  # noqa: BLE001
-            log.exception("persist song for task %s failed", task_id)
-
-        # 2. Edit the placeholder card.
-        title = snapshot.title or "(без названия)"
-        duration = (
-            f" · {snapshot.duration:.0f} сек"
-            if snapshot.duration is not None
-            else ""
-        )
-        edited = (
-            "✅ <b>Готово!</b>\n\n"
-            f"🎵 <b>{html.escape(title)}</b>{duration}\n"
-            f"🆔 <code>{html.escape(task_id)}</code>\n\n"
-            "ℹ️ Файл хранится на серверах Suno <b>15 дней</b>.\n"
-            "После первого проигрывания через бота он навсегда "
-            "сохраняется в Telegram — найти его можно через /musiclist."
-        )
-        with contextlib.suppress(Exception):
-            await bot.edit_message_text(
-                edited, chat_id=chat_id, message_id=message_id
-            )
-
-        # 3. Deliver the mp3 + capture Telegram's file_id on success.
-        if snapshot.audio_url:
-            try:
-                sent_audio = await bot.send_audio(
-                    chat_id,
-                    audio=snapshot.audio_url,
-                    title=title,
-                    performer="Suno",
-                    caption=f"🎵 {html.escape(title)}",
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("send_audio for task %s failed: %s", task_id, exc)
-                with contextlib.suppress(Exception):
-                    await bot.send_message(
-                        chat_id,
-                        f"🔗 <a href=\"{html.escape(snapshot.audio_url)}\">"
-                        "Скачать mp3</a>",
-                        disable_web_page_preview=False,
-                    )
-                return
-
-            # Persist Telegram's permanent file_id so /musiclist can
-            # re-deliver this track via Telegram even after Suno's
-            # 15-day URL retention expires.
-            if (
-                song_id is not None
-                and sent_audio
-                and sent_audio.audio
-            ):
-                try:
-                    async with SessionLocal() as session:
-                        await set_tg_file_id(
-                            session, song_id, sent_audio.audio.file_id
-                        )
-                except Exception:  # noqa: BLE001
-                    log.exception(
-                        "capture tg_audio_file_id for song %s failed",
-                        song_id,
-                    )
-        return
-
-    # Terminal but not success — show errorMessage from API if present.
-    reason = snapshot.error_message or snapshot.status
-    edited = (
-        "❌ <b>Suno вернул ошибку.</b>\n\n"
-        f"🆔 <code>{html.escape(task_id)}</code>\n"
-        f"📊 Статус: <code>{html.escape(snapshot.status)}</code>\n"
-        f"💬 Причина: {html.escape(reason)}"
-    )
-    with contextlib.suppress(Exception):
-        await bot.edit_message_text(
-            edited, chat_id=chat_id, message_id=message_id
-        )
 
 
 @router.message(Command("suno_status"), F.chat.type == ChatType.PRIVATE)

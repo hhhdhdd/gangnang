@@ -149,6 +149,32 @@ def music_menu_keyboard(
         ]
     )
 
+    # Generate-song-now button. The whole point of /musicmenu in a
+    # group is to control how that chat's song-of-the-day comes out;
+    # firing one off on demand belongs in the same screen.
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🎵 Сгенерировать песню сейчас",
+                callback_data=f"music:gen_now:{chat_id}",
+            )
+        ]
+    )
+
+    # Daily-song schedule. Opens a small picker (handled in
+    # song_admin.py) where the admin sets a daily time or turns the
+    # automatic song-of-the-day off. State (on/off + time) is shown
+    # inside that submenu, so this top-level button stays static and
+    # the keyboard signature is unchanged.
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="📅 Расписание песни дня",
+                callback_data=f"music:song_sched:{chat_id}",
+            )
+        ]
+    )
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

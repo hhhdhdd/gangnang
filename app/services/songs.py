@@ -143,6 +143,22 @@ async def count_songs_for_chat(session: AsyncSession, chat_id: int) -> int:
     return int(result.scalar() or 0)
 
 
+async def count_songs_for_chat_since(
+    session: AsyncSession, chat_id: int, since
+) -> int:
+    """Successful songs for a chat created at/after ``since`` (UTC).
+
+    Used by the per-chat ``/music`` daily quota — counts everything the
+    chat produced today (manual ``/music`` + scheduled daily song)."""
+    stmt = select(func.count(Song.id)).where(
+        Song.chat_id == chat_id,
+        Song.status == VISIBLE_STATUS,
+        Song.created_at >= since,
+    )
+    result = await session.execute(stmt)
+    return int(result.scalar() or 0)
+
+
 async def list_songs_for_user(
     session: AsyncSession,
     user_id: int,
@@ -184,3 +200,107 @@ async def count_songs_for_user(
 
 async def get_song(session: AsyncSession, song_id: int) -> Song | None:
     return await session.get(Song, song_id)
+
+
+async def has_song_on_date(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    day_start_utc: datetime,
+    day_end_utc: datetime,
+) -> bool:
+    """True if a successful song already exists for ``chat_id`` within
+    ``[day_start_utc, day_end_utc)``.
+
+    Used by the scheduled daily-song job to dedupe: a cron misfire +
+    coalesce, a restart-replay, or a manual ``/song_now`` earlier the
+    same day shouldn't produce a second song. We key off the existing
+    ``songs`` table (no separate ``daily_songs`` table in the MVP) —
+    ``created_at`` is the generation timestamp in UTC.
+    """
+    stmt = select(func.count(Song.id)).where(
+        Song.chat_id == chat_id,
+        Song.status == VISIBLE_STATUS,
+        Song.created_at >= day_start_utc,
+        Song.created_at < day_end_utc,
+    )
+    result = await session.execute(stmt)
+    return int(result.scalar() or 0) > 0
+
+
+# ---------- stats ----------
+
+async def song_stats(
+    session: AsyncSession, *, days: int = 30
+) -> dict:
+    """Aggregate counts for ``/song_stats``.
+
+    Returns a dict with:
+
+    - ``total``        — all successful songs ever.
+    - ``recent``       — successful songs in the last ``days`` days.
+    - ``by_chat``      — list of ``(chat_id, count)`` over the window,
+                         most-active first (top 10).
+    - ``by_status``    — list of ``(status, count)`` over the window
+                         (distribution incl. non-success rows, if any).
+    - ``days``         — the window passed in (for the caption).
+
+    Computed in Python-side datetimes (not SQL INTERVAL) so it works on
+    both PostgreSQL and SQLite.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    total = int(
+        (
+            await session.execute(
+                select(func.count(Song.id)).where(
+                    Song.status == VISIBLE_STATUS
+                )
+            )
+        ).scalar()
+        or 0
+    )
+
+    recent = int(
+        (
+            await session.execute(
+                select(func.count(Song.id)).where(
+                    Song.status == VISIBLE_STATUS,
+                    Song.created_at >= since,
+                )
+            )
+        ).scalar()
+        or 0
+    )
+
+    by_chat_rows = (
+        await session.execute(
+            select(Song.chat_id, func.count(Song.id))
+            .where(
+                Song.status == VISIBLE_STATUS,
+                Song.created_at >= since,
+            )
+            .group_by(Song.chat_id)
+            .order_by(func.count(Song.id).desc())
+            .limit(10)
+        )
+    ).all()
+
+    by_status_rows = (
+        await session.execute(
+            select(Song.status, func.count(Song.id))
+            .where(Song.created_at >= since)
+            .group_by(Song.status)
+            .order_by(func.count(Song.id).desc())
+        )
+    ).all()
+
+    return {
+        "total": total,
+        "recent": recent,
+        "by_chat": [(cid, int(c)) for cid, c in by_chat_rows],
+        "by_status": [(st, int(c)) for st, c in by_status_rows],
+        "days": days,
+    }

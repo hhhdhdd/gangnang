@@ -24,11 +24,10 @@ from app.models import ChatMessage
 # embedded "ttl" concept.
 RETENTION_DAYS = 2
 
-# Hard cap on a single message body to avoid blowing up rows on weird
-# input (forwarded long posts, copy-pasted novels, etc.). Telegram
-# itself caps text at 4096; we keep enough for an LLM-summarizer to
-# work with.
-MAX_TEXT_LEN = 2000
+# Hard cap on a single message body. Telegram caps text at 4096; we keep
+# the same ceiling so nothing said in chat is silently truncated before
+# it reaches the LLM-summarizer. Captions ride the same limit.
+MAX_TEXT_LEN = 4096
 
 
 async def insert_message(
@@ -101,6 +100,23 @@ async def fetch_messages_since(
     return list(result.scalars().all())
 
 
+async def oldest_message_at(
+    session: AsyncSession, *, chat_id: int | None = None
+) -> datetime | None:
+    """Timestamp of the oldest captured message, optionally per-chat.
+
+    Used by ``/captured`` to surface "messages start from <date>" so
+    admins can verify the retention sweep is actually running and tell
+    at a glance how much history the daily-song pipeline has to work
+    with right now.
+    """
+    stmt = select(func.min(ChatMessage.created_at))
+    if chat_id is not None:
+        stmt = stmt.where(ChatMessage.chat_id == chat_id)
+    result = await session.execute(stmt)
+    return result.scalar()
+
+
 async def delete_older_than(
     session: AsyncSession, cutoff: datetime
 ) -> int:
@@ -118,3 +134,18 @@ async def delete_older_than(
 def cutoff_for_retention(days: int = RETENTION_DAYS) -> datetime:
     """UTC timestamp ``days`` days ago. Used by the scheduler job."""
     return datetime.now(timezone.utc) - timedelta(days=days)
+
+
+async def purge_chat_history(session: AsyncSession, chat_id: int) -> int:
+    """Delete ALL captured messages for one chat. Returns rows deleted.
+
+    Used by ``/song_purge`` (OWNER-only) to honour a "stop collecting /
+    forget what you have" request for a specific chat — see requirement
+    N1.3. Songs (the ``songs`` table) are intentionally NOT touched;
+    this only clears the raw ``chat_messages`` history the daily-song
+    summarizer reads from.
+    """
+    stmt = delete(ChatMessage).where(ChatMessage.chat_id == chat_id)
+    result = await session.execute(stmt)
+    await session.commit()
+    return int(result.rowcount or 0)
