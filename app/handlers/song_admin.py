@@ -37,10 +37,12 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models import Chat
 from app.services.admins import is_admin
 from app.services.chats import list_chats
 from app.services.song_pipeline import (
+    DEFAULT_MIN_MESSAGES,
     SongPipelineError,
     start_song_generation,
     watch_suno_task,
@@ -50,6 +52,88 @@ from app.services.suno import get_api_key as get_suno_api_key
 log = logging.getLogger(__name__)
 
 router = Router(name="song_admin")
+
+
+# Daily-song time presets shown in the schedule submenu, as (HH, MM).
+# Crontab built from these is "MM HH * * *" in the global settings.tz.
+SONG_TIME_PRESETS: list[tuple[int, int]] = [
+    (18, 0),
+    (20, 0),
+    (21, 0),
+    (22, 0),
+]
+
+
+def _cron_to_hhmm(cron: str | None) -> str | None:
+    """Best-effort 'MM HH * * *' → 'HH:MM'. Returns None if unparseable."""
+    if not cron:
+        return None
+    parts = cron.split()
+    if len(parts) < 2:
+        return None
+    minute, hour = parts[0], parts[1]
+    if not (minute.isdigit() and hour.isdigit()):
+        return None
+    return f"{int(hour):02d}:{int(minute):02d}"
+
+
+def _song_schedule_keyboard(
+    chat_id: int, *, enabled: bool, cron: str | None
+) -> InlineKeyboardMarkup:
+    """Time-preset picker + off button for the daily-song schedule.
+
+    The currently-active preset (if any) gets a ✅ marker.
+    """
+    current = _cron_to_hhmm(cron) if enabled else None
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for hh, mm in SONG_TIME_PRESETS:
+        label = f"{hh:02d}:{mm:02d}"
+        marker = "✅ " if current == label else "🕘 "
+        row.append(
+            InlineKeyboardButton(
+                text=f"{marker}{label}",
+                callback_data=f"music:song_at:{chat_id}:{hh}:{mm}",
+            )
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🚫 Выключить" if enabled else "🚫 Выключено",
+                callback_data=f"music:song_off:{chat_id}",
+            ),
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"music:menu_open:{chat_id}",
+            ),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _render_song_schedule_text(
+    chat: Chat, *, tz: str
+) -> str:
+    if chat.song_enabled and chat.song_cron:
+        hhmm = _cron_to_hhmm(chat.song_cron) or chat.song_cron
+        state = f"🟢 включено · ежедневно в <b>{hhmm}</b> ({tz})"
+    else:
+        state = "🔴 выключено"
+    title = html.escape(chat.title or str(chat.chat_id))
+    return (
+        f"📅 <b>Расписание «Песни дня»</b>\n"
+        f"📍 {title}\n\n"
+        f"Сейчас: {state}\n\n"
+        "Бот раз в день возьмёт сообщения чата за последние 24 часа, "
+        "сгенерирует песню и запостит её сюда. Если за сутки меньше "
+        f"{DEFAULT_MIN_MESSAGES} сообщений — день пропускается молча.\n\n"
+        "Выбери время или выключи 👇"
+    )
 
 
 # ---------- gating ----------
@@ -346,6 +430,115 @@ async def cb_gen_run_in_chat(
         placeholder=placeholder,
     )
     await callback.answer("🎵 Запустил")
+
+
+# ---------- daily-song schedule submenu ----------
+
+@router.callback_query(F.data.startswith("music:song_sched:"))
+async def cb_song_sched_open(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    """Open the schedule picker for a chat (from its /musicmenu)."""
+    if not await _require_admin(callback, session):
+        return
+    try:
+        chat_id = int((callback.data or "").split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+    chat = await session.get(Chat, chat_id)
+    if chat is None:
+        await callback.answer("Чат не найден", show_alert=True)
+        return
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(
+                _render_song_schedule_text(chat, tz=settings.tz),
+                reply_markup=_song_schedule_keyboard(
+                    chat_id,
+                    enabled=chat.song_enabled,
+                    cron=chat.song_cron,
+                ),
+            )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("music:song_at:"))
+async def cb_song_sched_set(
+    callback: CallbackQuery, session: AsyncSession, scheduler=None
+) -> None:
+    """Enable the daily song at the picked HH:MM (global settings.tz)."""
+    if not await _require_admin(callback, session):
+        return
+    parts = (callback.data or "").split(":")
+    # music:song_at:<chat_id>:<hh>:<mm>
+    if len(parts) != 5:
+        await callback.answer()
+        return
+    try:
+        chat_id = int(parts[2])
+        hh = int(parts[3])
+        mm = int(parts[4])
+    except ValueError:
+        await callback.answer()
+        return
+    chat = await session.get(Chat, chat_id)
+    if chat is None:
+        await callback.answer("Чат не найден", show_alert=True)
+        return
+
+    chat.song_cron = f"{mm} {hh} * * *"
+    chat.song_enabled = True
+    await session.commit()
+    if scheduler is not None:
+        await scheduler.sync_chat(chat_id)
+
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(
+                _render_song_schedule_text(chat, tz=settings.tz),
+                reply_markup=_song_schedule_keyboard(
+                    chat_id,
+                    enabled=chat.song_enabled,
+                    cron=chat.song_cron,
+                ),
+            )
+    await callback.answer(f"✅ Включено · {hh:02d}:{mm:02d}")
+
+
+@router.callback_query(F.data.startswith("music:song_off:"))
+async def cb_song_sched_off(
+    callback: CallbackQuery, session: AsyncSession, scheduler=None
+) -> None:
+    """Disable the daily song for a chat (keeps the stored time)."""
+    if not await _require_admin(callback, session):
+        return
+    try:
+        chat_id = int((callback.data or "").split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+    chat = await session.get(Chat, chat_id)
+    if chat is None:
+        await callback.answer("Чат не найден", show_alert=True)
+        return
+
+    chat.song_enabled = False
+    await session.commit()
+    if scheduler is not None:
+        await scheduler.sync_chat(chat_id)
+
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(
+                _render_song_schedule_text(chat, tz=settings.tz),
+                reply_markup=_song_schedule_keyboard(
+                    chat_id,
+                    enabled=chat.song_enabled,
+                    cron=chat.song_cron,
+                ),
+            )
+    await callback.answer("🚫 Выключено")
 
 
 __all__ = ["router"]

@@ -161,6 +161,20 @@ def music_menu_keyboard(
         ]
     )
 
+    # Daily-song schedule. Opens a small picker (handled in
+    # song_admin.py) where the admin sets a daily time or turns the
+    # automatic song-of-the-day off. State (on/off + time) is shown
+    # inside that submenu, so this top-level button stays static and
+    # the keyboard signature is unchanged.
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="📅 Расписание песни дня",
+                callback_data=f"music:song_sched:{chat_id}",
+            )
+        ]
+    )
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
