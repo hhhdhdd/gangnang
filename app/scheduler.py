@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 
 PROMPT_PREFIX = "prompt:"
 DIGEST_PREFIX = "digest:"
+SONG_PREFIX = "song:"
 RETENTION_JOB_ID = "retention:chat_messages"
 
 # Cron expression for the chat-messages retention sweep. "5 * * * *"
@@ -38,6 +39,10 @@ def _prompt_job_id(chat_id: int) -> str:
 
 def _digest_job_id(user_id: int) -> str:
     return f"{DIGEST_PREFIX}{user_id}"
+
+
+def _song_job_id(chat_id: int) -> str:
+    return f"{SONG_PREFIX}{chat_id}"
 
 
 class IdeaScheduler:
@@ -80,10 +85,21 @@ class IdeaScheduler:
             )
             admins = list(admin_rows.scalars().all())
 
+            song_rows = await session.execute(
+                select(Chat).where(
+                    Chat.is_active.is_(True),
+                    Chat.song_enabled.is_(True),
+                    Chat.song_cron.is_not(None),
+                )
+            )
+            song_chats = list(song_rows.scalars().all())
+
         for chat in chats:
             self._schedule_prompt(chat.chat_id, chat.schedule_cron)
         for admin in admins:
             self._schedule_digest(admin.user_id, admin.digest_cron)
+        for chat in song_chats:
+            self._schedule_song(chat.chat_id, chat.song_cron)
 
         # Always-on housekeeping: prune chat_messages older than the
         # retention window every hour.
@@ -91,9 +107,11 @@ class IdeaScheduler:
 
         self._scheduler.start()
         log.info(
-            "scheduler started with %d prompt + %d digest job(s) + retention",
+            "scheduler started with %d prompt + %d digest + %d song "
+            "job(s) + retention",
             len(chats),
             len(admins),
+            len(song_chats),
         )
 
     async def shutdown(self) -> None:
@@ -107,11 +125,22 @@ class IdeaScheduler:
         async with SessionLocal() as session:
             chat = await session.get(Chat, chat_id)
 
+        # Prompt job side.
         if chat is None or not chat.is_active or not chat.schedule_cron:
             self._remove_job(_prompt_job_id(chat_id))
-            return
+        else:
+            self._schedule_prompt(chat.chat_id, chat.schedule_cron)
 
-        self._schedule_prompt(chat.chat_id, chat.schedule_cron)
+        # Daily-song job side — independent of the prompt schedule.
+        if (
+            chat is None
+            or not chat.is_active
+            or not chat.song_enabled
+            or not chat.song_cron
+        ):
+            self._remove_job(_song_job_id(chat_id))
+        else:
+            self._schedule_song(chat.chat_id, chat.song_cron)
 
     def _schedule_prompt(self, chat_id: int, cron: str | None) -> None:
         if not cron:
@@ -149,6 +178,58 @@ class IdeaScheduler:
                 self._remove_job(_prompt_job_id(chat_id))
                 return
             await send_prompt_to_chat(self.bot, session, chat)
+
+    # ---------- daily-song jobs ----------
+
+    def _schedule_song(self, chat_id: int, cron: str | None) -> None:
+        if not cron:
+            self._remove_job(_song_job_id(chat_id))
+            return
+        try:
+            trigger = CronTrigger.from_crontab(cron, timezone=settings.tz)
+        except ValueError as exc:
+            log.warning(
+                "invalid song cron for chat_id=%s (%r): %s",
+                chat_id,
+                cron,
+                exc,
+            )
+            self._remove_job(_song_job_id(chat_id))
+            return
+
+        self._scheduler.add_job(
+            self._run_song,
+            trigger=trigger,
+            id=_song_job_id(chat_id),
+            args=[chat_id],
+            replace_existing=True,
+            # Songs take minutes to generate; a generous grace window
+            # keeps a missed fire (deploy / restart) from being dropped
+            # if it lands within 10 min of the scheduled time.
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+        log.info("scheduled daily-song chat_id=%s with cron=%r", chat_id, cron)
+
+    async def _run_song(self, chat_id: int) -> None:
+        # Re-check enablement at fire time; the toggle may have flipped
+        # since the job was scheduled. The pipeline also re-checks, but
+        # bailing here avoids importing it for a disabled chat.
+        async with SessionLocal() as session:
+            chat = await session.get(Chat, chat_id)
+            if chat is None or not chat.is_active or not chat.song_enabled:
+                self._remove_job(_song_job_id(chat_id))
+                return
+
+        # Quiet hours intentionally NOT applied — the daily song is an
+        # explicitly-scheduled, opt-in event, like the spec's 21:00 post.
+        from app.services.song_pipeline import run_scheduled_song_for_chat
+
+        try:
+            await run_scheduled_song_for_chat(self.bot, chat_id)
+        except Exception:  # noqa: BLE001
+            log.exception("daily-song job failed for chat_id=%s", chat_id)
 
     # ---------- digest jobs ----------
 

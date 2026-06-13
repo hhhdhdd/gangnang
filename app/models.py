@@ -62,6 +62,17 @@ class Chat(Base):
         Boolean, default=False, nullable=False
     )
     song_style: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Daily-song scheduling. ``song_enabled`` is the per-chat opt-in
+    # toggle; ``song_cron`` holds the crontab expression (TZ = global
+    # settings.tz) that fires ``run_scheduled_song_for_chat``. A chat
+    # is scheduled only when is_active AND song_enabled AND song_cron.
+    song_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    song_cron: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_song_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

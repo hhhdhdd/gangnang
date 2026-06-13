@@ -15,23 +15,20 @@
 | B | Music storage UI: `/musiclist` + `/musicmenu`, песни хранятся бессрочно | `[x]` | 4 | 0 | 4 |
 | C | Observability + unified `/musicmenu` + simplified OpenRouter + target duration | `[x]` | 7 | 0 | 7 |
 | D | Song-from-chat MVP: `song_pipeline.py` + `/song_now` + кнопка в /musicmenu | `[x]` | 5 | 0 | 5 |
+| E | Scheduled daily song: миграция `chats.song_*`, scheduler-job, headless pipeline, UI расписания | `[~]` | 0 | 4 | 4 |
 | 2 | LLM-абстракция: OpenRouter-клиент, таблица `llm_models`, рантайм-управление через `/menu` | `[ ]` | 0 | 0 | 6 |
 | 3 | Summarizer + songwriter: map-reduce, JSON-парсинг с ретраями, dry-run `/song_test` | `[ ]` | 0 | 0 | 4 |
 | 4 | Song-провайдер + оркестратор: миграция `daily_songs`, SunoApiOrgProvider+SunoSelfHosted+LyricsOnly, `daily_song.py`, `/song_now`, scheduler-job, постинг в чат | `[ ]` | 0 | 0 | 7 |
 | 5 | Полировка: `/song_stats`, `/song_purge`, alert при первом включении, sweep `stale_on_restart` | `[ ]` | 0 | 0 | 4 |
 | 6 | Опционально: тесты-смоук, retention-cron, обложка mp3 | `[ ]` | 0 | 0 | 3 |
 
-**Итого**: 29 / 0 / 53
+**Итого**: 29 / 4 / 57
 
 ## Открытые PR
 
-_Открытых PR нет — все фазы 0/A/1/B/C/D смерджены в основную ветку._
-
 | PR | Ветка | Фаза | Описание |
 |----|-------|------|----------|
-| [#26](https://github.com/pavlodrab/ideabottg/pull/26) | `feat/suno-api-bot-config` | A · 1 · B | sunoapi.org интеграция + capture pipeline + music storage UI — **merged** |
-| [#28](https://github.com/pavlodrab/ideabottg/pull/28) | `feat/openrouter-musicmenu-logs` | C | unified `/musicmenu`, `/logs`, OpenRouter MVP, target duration — **merged** |
-| [#29](https://github.com/pavlodrab/ideabottg/pull/29) | `feat/song-from-chat-pipeline` | D | song-from-chat manual trigger: `song_pipeline.py`, `/song_now`, кнопка «🎵 Сгенерировать песню» — **merged** |
+| _TBD_ | `feat/scheduled-daily-song` | E | автоматическая «Песня дня» по расписанию: per-chat opt-in + cron-job поверх `song_pipeline`, UI расписания в per-chat `/musicmenu` |
 
 ---
 
@@ -299,6 +296,47 @@ MVP без scheduler — только manual trigger из меню или ком
 - Дедуп по дате (`daily_songs.unique(chat_id, date_msk)`) — Phase 4.
 - `LyricsOnlyProvider` fallback на отказ Suno — пока пайплайн просто отвечает ошибкой в placeholder.
 - Per-role LLM-модели (Phase 2 в исходном дизайне — `llm_models` таблица).
+
+---
+
+## Фаза E — Scheduled daily song (автогенерация по расписанию)
+
+> **Все задачи ниже — в открытом PR (`feat/scheduled-daily-song`).** После мерджа маркеры переключаются `[~]` → `[x]`.
+
+Достраивает над manual-триггером из Фазы D автоматическую ежедневную
+генерацию: каждый opt-in чат получает cron-job, который раз в день
+прогоняет `song_pipeline` и постит mp3 в сам чат. Это реализация
+изначальной цели Phase 4 (scheduler + постинг), но **поверх готового
+`song_pipeline`**, без отдельной таблицы `daily_songs` и map-reduce из
+исходного дизайна — они остаются post-MVP (см. «Что НЕ делает фаза E»).
+
+- [~] **E.1** Миграция `0008_chats_song_schedule` + поля модели `Chat`:
+  - `chats.song_enabled` (Boolean, default false) — per-chat opt-in.
+  - `chats.song_cron` (String(64), nullable) — crontab в TZ `settings.tz`.
+  - `chats.last_song_sent_at` (timestamptz, nullable) — отметка последнего успешного постинга.
+  - Модель `Chat` в `app/models.py` расширена тремя полями.
+- [~] **E.2** `app/services/song_pipeline.py::run_scheduled_song_for_chat(bot, chat_id)` — headless-обёртка:
+  - Проверяет `is_active AND song_enabled`, гоняет `start_song_generation` (requested_by=None).
+  - На `too_few_messages` — **молчаливый** skip (без спама в группу). На прочих ошибках — лог, без постинга.
+  - Только при успешном submit постит placeholder в группу, затем `await watch_suno_task(placeholder=audio=chat_id)`. По завершении обновляет `last_song_sent_at`.
+- [~] **E.3** `app/scheduler.py` — job-тип `song:{chat_id}`:
+  - `SONG_PREFIX`, `_song_job_id`, `_schedule_song`, `_run_song` (re-check enablement + quiet-hours игнорятся осознанно).
+  - Загрузка всех `is_active AND song_enabled AND song_cron` чатов в `start()`.
+  - `sync_chat` расширен: независимо (раз)планирует prompt-job и song-job.
+- [~] **E.4** UI расписания (per-chat `/musicmenu`):
+  - Статическая кнопка «📅 Расписание песни дня» в `music_menu_keyboard` (без смены сигнатуры).
+  - В `song_admin.py` — подменю с пресетами времени (18:00 / 20:00 / 21:00 / 22:00) + «Выключить»; callback'и `music:song_sched:<chat_id>` / `music:song_at:<chat_id>:<hh>:<mm>` / `music:song_off:<chat_id>`. Сохраняет `song_cron`/`song_enabled` и зовёт `scheduler.sync_chat`.
+
+**Definition of done фазы E**:
+1. Админ в группе: `/musicmenu` → «📅 Расписание песни дня» → «21:00» → видит «🟢 включено · ежедневно в 21:00».
+2. На следующий день в 21:00 (TZ `settings.tz`) бот сам собирает сутки чата, генерирует песню и постит mp3 + lyrics в группу.
+3. В тихий день (<20 сообщений) — постинга нет, в логах строчка о пропуске.
+4. «🚫 Выключить» в подменю — снимает job, автопостинг прекращается.
+
+**Что НЕ делает фаза E** (post-MVP):
+- Таблица `daily_songs` + дедуп по `(chat_id, date_msk)` — повторный ручной запуск в тот же день не блокируется.
+- `LyricsOnlyProvider` fallback на отказ Suno.
+- Sweep «зависших» запусков при рестарте (F8.3) и `/song_stats` — это Фаза 5.
 
 ---
 

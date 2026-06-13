@@ -800,6 +800,115 @@ async def handle_terminal(
         )
 
 
+# ---------- step 5: scheduled (headless) flow ----------
+
+
+async def run_scheduled_song_for_chat(bot: Bot, chat_id: int) -> None:
+    """Cron entry point: generate the song-of-the-day for one chat and
+    post it **into that same chat**.
+
+    Differences from the manual ``/song_now`` flow:
+
+    - No admin DM. The status placeholder and the final mp3 both live
+      in the target group (``placeholder_chat_id == audio_chat_id``).
+    - ``requested_by`` is ``None`` — there's no human behind it.
+    - On ``too_few_messages`` we skip **silently** (just a log line).
+      Posting "не хватило сообщений" into the group every quiet day
+      would be spam; the absence of a song is signal enough.
+    - We do the LLM + Suno-submit work *before* posting anything, so a
+      quiet day or a misconfiguration never leaves a dangling
+      "готовлю…" message in the group.
+
+    Runs to completion (awaits the Suno poll, up to ``TASK_TIMEOUT_SEC``)
+    so APScheduler's ``max_instances=1`` / ``coalesce`` semantics keep
+    overlapping fires from stacking.
+    """
+    async with SessionLocal() as session:
+        chat = await session.get(Chat, chat_id)
+        if chat is None:
+            log.info("scheduled-song: chat %s gone, skipping", chat_id)
+            return
+        if not chat.is_active or not chat.song_enabled:
+            log.info(
+                "scheduled-song: chat %s not active/enabled, skipping",
+                chat_id,
+            )
+            return
+
+        try:
+            result = await start_song_generation(
+                session=session,
+                chat_id=chat_id,
+                requested_by=None,
+            )
+        except SongPipelineError as exc:
+            if exc.code == "too_few_messages":
+                log.info(
+                    "scheduled-song: chat %s too few messages, skipping "
+                    "silently",
+                    chat_id,
+                )
+            else:
+                log.warning(
+                    "scheduled-song: chat %s refused code=%s msg=%s",
+                    chat_id,
+                    exc.code,
+                    exc.msg,
+                )
+            return
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "scheduled-song: unexpected error for chat %s", chat_id
+            )
+            return
+
+        suno_key = await get_suno_api_key(session)
+        if not suno_key:
+            log.warning(
+                "scheduled-song: suno key vanished mid-run for chat %s",
+                chat_id,
+            )
+            return
+
+    # Generation accepted by Suno — now it's worth telling the group.
+    try:
+        placeholder = await bot.send_message(
+            chat_id,
+            "🎵 <b>Песня дня готовится…</b>\n"
+            f"📊 По {result.n_messages} сообщениям за сутки.\n"
+            "Обычно занимает 2–3 минуты.",
+        )
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "scheduled-song: can't post placeholder to chat %s", chat_id
+        )
+        return
+
+    await watch_suno_task(
+        bot=bot,
+        api_key=suno_key,
+        task_id=result.suno_task_id,
+        placeholder_chat_id=chat_id,
+        placeholder_message_id=placeholder.message_id,
+        audio_chat_id=chat_id,
+        requested_by=None,
+        suno_model=result.suno_model,
+        prompt=result.draft.lyrics,
+        title=result.draft.title,
+        style=result.draft.style,
+        lyrics=result.draft.lyrics,
+        chat_id_for_song=chat_id,
+    )
+
+    # Best-effort bookkeeping — record the last successful scheduled run.
+    with contextlib.suppress(Exception):
+        async with SessionLocal() as session:
+            chat = await session.get(Chat, chat_id)
+            if chat is not None:
+                chat.last_song_sent_at = datetime.now(timezone.utc)
+                await session.commit()
+
+
 __all__ = [
     "DEFAULT_MIN_MESSAGES",
     "DEFAULT_WINDOW_HOURS",
@@ -811,6 +920,7 @@ __all__ = [
     "collect_recent_messages",
     "handle_terminal",
     "llm_make_song_draft",
+    "run_scheduled_song_for_chat",
     "start_song_generation",
     "trim_chat_text",
     "watch_suno_task",
