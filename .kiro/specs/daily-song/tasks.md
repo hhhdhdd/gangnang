@@ -27,7 +27,7 @@
 | PR | Ветка | Фаза | Описание |
 |----|-------|------|----------|
 | [#26](https://github.com/pavlodrab/ideabottg/pull/26) | `feat/suno-api-bot-config` | A | sunoapi.org интеграция: API-ключ/модель/тестовая генерация через `/suno` в боте |
-| _TBD_ | `feat/openrouter-musicmenu-logs` | C | unified `/musicmenu` (DM admin home), `/logs`, OpenRouter MVP, target song duration, MAX_TEXT_LEN=4096, oldest-row в `/captured` |
+| [#28](https://github.com/pavlodrab/ideabottg/pull/28) | `feat/openrouter-musicmenu-logs` | C | unified `/musicmenu` (DM admin home), `/logs`, OpenRouter MVP, target song duration, MAX_TEXT_LEN=4096, oldest-row в `/captured` |
 
 ---
 
@@ -189,6 +189,8 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
 ---
 
 ## Фаза C — Observability + unified `/musicmenu` + simplified OpenRouter + target duration
+
+> **Все `[~]` задачи ниже — в [PR #28](https://github.com/pavlodrab/ideabottg/pull/28)** (`feat/openrouter-musicmenu-logs`). После мерджа маркеры переключаются `[~]` → `[x]` в первом следующем PR.
 
 Параллельная фаза, реализованная вместе с Phase 1 / B. Цель — закрыть
 владельцеву задачу «всё управление ботом в одной менюшке `/musicmenu`»,
