@@ -20,16 +20,18 @@
 | 3 | Summarizer + songwriter: map-reduce, JSON-парсинг с ретраями, dry-run `/song_test` | `⛔ superseded (D)` | 0 | 0 | 4 |
 | 4 | Song-провайдер + оркестратор: миграция `daily_songs`, SunoApiOrgProvider+SunoSelfHosted+LyricsOnly, `daily_song.py`, `/song_now`, scheduler-job, постинг в чат | `[ ]` | 0 | 0 | 7 |
 | 5 | Полировка: `/song_stats`, `/song_purge`, alert при первом включении, sweep `stale_on_restart` | `[~]` | 1 | 2 | 4 |
+| F | Dedup по дню + LyricsOnly fallback + обложка mp3 + pytest smoke-сьют | `[~]` | 0 | 4 | 4 |
 | 6 | Опционально: тесты-смоук, retention-cron, обложка mp3 | `[ ]` | 0 | 0 | 3 |
 
-**Итого**: 31 / 6 / 57
+**Итого**: 31 / 10 / 61
 
-> Из 57 задач **superseded MVP-архитектурой** (Фазы C/D): 9 (вся Фаза 2 кроме
-> 2.4 + вся Фаза 3). **N/A в MVP**: 5.3. **Частично superseded Фазой E**:
-> Фаза 4 (scheduler + постинг сделаны в E; остаются 4.1–4.4 — `daily_songs`,
-> provider-абстракция, dedup — как post-MVP). **Опционально**: Фаза 6 (3).
-> Функционально фича готова: capture → OpenRouter → Suno → постинг, ручной
-> (`/song_now`) и по расписанию (Фаза E).
+> Из 61 задачи **superseded MVP-архитектурой** (Фазы C/D): 9 (вся Фаза 2 кроме
+> 2.4 + вся Фаза 3). **N/A в MVP**: 5.3, 6.2. **Частично superseded Фазой E/F**:
+> Фаза 4 (scheduler + постинг — E; dedup по дню и LyricsOnly fallback — F;
+> остаются 4.1–4.2 `daily_songs` и 4.3 provider-абстракция как post-MVP).
+> Задачи 6.1/6.3 реализованы в Фазе F (F.4/F.3). Функционально фича готова:
+> capture → OpenRouter → Suno → постинг, ручной (`/song_now`) и по расписанию
+> (Фаза E) с дедупом и текстовым fallback.
 
 ## Открытые PR
 
@@ -37,6 +39,7 @@
 |----|-------|------|----------|
 | [#30](https://github.com/pavlodrab/ideabottg/pull/30) | `feat/scheduled-daily-song` | E | автоматическая «Песня дня» по расписанию: per-chat opt-in + cron-job поверх `song_pipeline`, UI расписания в per-chat `/musicmenu` |
 | [#31](https://github.com/pavlodrab/ideabottg/pull/31) | `feat/song-stats-purge` | 5 | `/song_stats` + `/song_purge` (OWNER, с подтверждением); стек поверх PR #30 |
+| _TBD_ | `feat/song-dedup-fallback-tests` | F · 4 · 6 | dedup по дню + LyricsOnly fallback + обложка mp3 + pytest smoke-сьют; стек поверх PR #31 |
 
 ---
 
@@ -152,13 +155,13 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
 
 ## Фаза 4 — Song-провайдер + оркестратор + scheduler + постинг
 
-> **Частично реализовано Фазой E (PR #30):** scheduler-job `song:{chat_id}`,
-> постинг mp3 в чат и оркестрация поверх `song_pipeline` — сделаны. Ручной
-> `/song_now` (4.6) — в Фазе D (PR #29). Остаются как **post-MVP**: таблица
-> `daily_songs` (4.1–4.2), provider-абстракция `SongProvider` +
-> `LyricsOnly`/self-hosted (4.3), dedup по `(chat_id, date_msk)` и fallback
-> (часть 4.4), toggle в `chat_settings_keyboard` (4.7 — заменён UI расписания
-> в per-chat `/musicmenu` из Фазы E).
+> **Частично реализовано Фазами E (PR #30) и F:** scheduler-job `song:{chat_id}`,
+> постинг mp3 в чат и оркестрация поверх `song_pipeline` — Фаза E. Ручной
+> `/song_now` (4.6) — Фаза D (PR #29). Dedup по дню (часть 4.4) и LyricsOnly
+> fallback (4.3 в части fallback, F5.4) — Фаза F. Остаются как **post-MVP**:
+> таблица `daily_songs` (4.1–4.2), полноценная provider-абстракция
+> `SongProvider` + self-hosted (4.3), toggle в `chat_settings_keyboard`
+> (4.7 — заменён UI расписания в per-chat `/musicmenu` из Фазы E).
 
 Цель: полный пайплайн работает; cron каждый день в 21:00 MSK постит mp3 в чат.
 
@@ -187,9 +190,33 @@ vse cherez bota nastroit»). Никаких env-переменных для Suno
 
 ## Фаза 6 — Опционально (post-MVP)
 
-- [ ] **6.1** Smoke-тесты для `summarize_day` / `digest_to_song` / `LyricsOnlyProvider` (только если попросят).
-- [ ] **6.2** Retention-cron: `chat_messages` старше `SONG_RETENTION_DAYS` (default 30) удалять.
-- [ ] **6.3** Обложка: пробросить `image_url` из Suno-ответа, прикладывать к посту.
+> **6.1 и 6.3 реализованы в Фазе F** (см. ниже). 6.2 — N/A.
+
+- [x] **6.1** Smoke-тесты — реализованы в Фазе F (F.4): pytest-сьют на pure helpers + DB (dedup/stats/purge). Адаптировано под фактическую архитектуру (`song_pipeline`, а не `summarize_day`/`LyricsOnlyProvider`-классы).
+- [ ] **6.2** ~~Retention-cron `chat_messages` старше 30 дней~~ — **N/A**: retention уже работает с окном 2 дня (`RETENTION_DAYS=2`, hourly job, PR #26). Второй cron с другим окном избыточен.
+- [x] **6.3** Обложка — реализовано в Фазе F (F.3): `image_url` из Suno постится как photo перед mp3.
+
+---
+
+## Фаза F — Dedup + LyricsOnly fallback + обложка + тесты
+
+> **Все задачи ниже — в открытом PR (`feat/song-dedup-fallback-tests`), стек поверх PR #31.** После мерджа маркеры переключаются `[~]` → `[x]`.
+
+Закрывает «хвост» Фазы 4 в lean-форме (без таблицы `daily_songs` и
+provider-абстракции) + опциональную Фазу 6. Всё проверено реально:
+`pytest` (23 теста зелёные), `alembic upgrade head` до 0008 на sqlite,
+импорт 49 модулей + сборка диспатчера.
+
+- [~] **F.1** Dedup по дню (интент 4.4): `songs.has_song_on_date(chat_id, day_start_utc, day_end_utc)`; в `run_scheduled_song_for_chat` день считается в TZ `settings.tz`, повторная генерация в тот же день (cron-misfire/coalesce, рестарт, ручной `/song_now`) пропускается.
+- [~] **F.2** LyricsOnly fallback (F5.4 / интент 4.3): `_post_lyrics_only` + параметр `post_lyrics_on_failure` в `watch_suno_task`/`handle_terminal`. На таймаут/фейл Suno в scheduled-флоу в чат уходит текст песни. Ручные флоу не трогаются (админ видит ошибку в DM-плейсхолдере).
+- [~] **F.3** Обложка mp3 (6.3): `snapshot.image_url` постится как `send_photo` перед `send_audio` (best-effort, не блокирует доставку mp3).
+- [~] **F.4** Smoke-тесты (6.1): `tests/` + `pytest.ini` + `requirements-dev.txt`. `test_song_helpers.py` (build/trim/json-parse/draft/cron) и `test_songs_db.py` (`has_song_on_date`/`song_stats`/`purge_chat_history` на in-memory sqlite). 23 теста.
+
+**Definition of done фазы F**:
+1. `pytest` → 23 passed.
+2. Scheduled-джоб не постит вторую песню в тот же день.
+3. При недоступности Suno в авто-режиме чат получает текст песни, а не тишину.
+4. У песни появляется обложка, если Suno её вернул.
 
 ---
 

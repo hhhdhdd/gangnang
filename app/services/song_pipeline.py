@@ -46,10 +46,12 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.db import SessionLocal
 from app.models import Chat
 from app.services.chat_messages import fetch_messages_since
@@ -62,7 +64,7 @@ from app.services.llm import (
     get_referer as get_llm_referer,
     get_system_prompt as get_llm_system_prompt,
 )
-from app.services.songs import set_tg_file_id, upsert_song
+from app.services.songs import has_song_on_date, set_tg_file_id, upsert_song
 from app.services.suno import (
     SunoApiError,
     SunoApiOrgClient,
@@ -554,6 +556,7 @@ async def watch_suno_task(
     style: str | None = None,
     lyrics: str | None = None,
     chat_id_for_song: int | None = None,
+    post_lyrics_on_failure: bool = False,
     timeout_sec: int = TASK_TIMEOUT_SEC,
     poll_interval_sec: int = TASK_POLL_INTERVAL_SEC,
 ) -> None:
@@ -609,6 +612,7 @@ async def watch_suno_task(
                 style=style,
                 lyrics=lyrics,
                 chat_id_for_song=chat_id_for_song,
+                post_lyrics_on_failure=post_lyrics_on_failure,
             )
             return
 
@@ -629,6 +633,41 @@ async def watch_suno_task(
             chat_id=placeholder_chat_id,
             message_id=placeholder_message_id,
         )
+    # Lyrics-only fallback (F5.4): the daily-song flow still wants the
+    # chat to get *something* when Suno is slow. Post the LLM lyrics so
+    # the song-of-the-day lands as text even without the mp3.
+    if post_lyrics_on_failure and lyrics:
+        await _post_lyrics_only(
+            bot, audio_chat_id, title=title, style=style, lyrics=lyrics
+        )
+
+
+async def _post_lyrics_only(
+    bot: Bot,
+    chat_id: int,
+    *,
+    title: str | None,
+    style: str | None,
+    lyrics: str,
+) -> None:
+    """Lyrics-only fallback post (F5.4) when Suno didn't deliver an mp3.
+
+    Best-effort: wrapped by the caller's flow so a send failure here
+    never crashes the pipeline.
+    """
+    head = f"🎵 <b>Песня дня (только текст — Suno не справился)</b>"
+    if title:
+        head += f"\n<b>{html.escape(title)}</b>"
+    if style:
+        head += f"\n🎨 <i>{html.escape(style[:120])}</i>"
+    with contextlib.suppress(Exception):
+        await bot.send_message(chat_id, head, disable_web_page_preview=True)
+    with contextlib.suppress(Exception):
+        await bot.send_message(
+            chat_id,
+            f"<pre>{html.escape(lyrics)[:3500]}</pre>",
+            disable_web_page_preview=True,
+        )
 
 
 async def handle_terminal(
@@ -646,6 +685,7 @@ async def handle_terminal(
     style: str | None = None,
     lyrics: str | None = None,
     chat_id_for_song: int | None = None,
+    post_lyrics_on_failure: bool = False,
 ) -> None:
     """Persist a ``Song`` row, update the placeholder, deliver mp3.
 
@@ -722,6 +762,16 @@ async def handle_terminal(
 
         # 3. Deliver mp3 + capture file_id.
         if snapshot.audio_url:
+            # Cover art (6.3): Suno returns an image_url for the track.
+            # Post it as a photo right before the audio so the song
+            # lands with a visual. Best-effort — never blocks the mp3.
+            if snapshot.image_url:
+                with contextlib.suppress(Exception):
+                    await bot.send_photo(
+                        audio_chat_id,
+                        photo=snapshot.image_url,
+                        caption=f"🎵 {html.escape(display_title)}",
+                    )
             caption_lines = [f"🎵 {html.escape(display_title)}"]
             if effective_style:
                 caption_lines.append(
@@ -798,6 +848,11 @@ async def handle_terminal(
             chat_id=placeholder_chat_id,
             message_id=placeholder_message_id,
         )
+    # Lyrics-only fallback (F5.4) for the daily-song flow.
+    if post_lyrics_on_failure and lyrics:
+        await _post_lyrics_only(
+            bot, audio_chat_id, title=title, style=style, lyrics=lyrics
+        )
 
 
 # ---------- step 5: scheduled (headless) flow ----------
@@ -831,6 +886,29 @@ async def run_scheduled_song_for_chat(bot: Bot, chat_id: int) -> None:
         if not chat.is_active or not chat.song_enabled:
             log.info(
                 "scheduled-song: chat %s not active/enabled, skipping",
+                chat_id,
+            )
+            return
+
+        # Dedup (intent of spec 4.4): don't post a second song the same
+        # day if a manual /song_now or an earlier cron fire already
+        # produced one. "Today" is in the scheduler's TZ.
+        tz = ZoneInfo(settings.tz)
+        day_start_local = datetime.now(tz).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        day_start_utc = day_start_local.astimezone(timezone.utc)
+        day_end_utc = (day_start_local + timedelta(days=1)).astimezone(
+            timezone.utc
+        )
+        if await has_song_on_date(
+            session,
+            chat_id=chat_id,
+            day_start_utc=day_start_utc,
+            day_end_utc=day_end_utc,
+        ):
+            log.info(
+                "scheduled-song: chat %s already has a song today, skipping",
                 chat_id,
             )
             return
@@ -898,6 +976,7 @@ async def run_scheduled_song_for_chat(bot: Bot, chat_id: int) -> None:
         style=result.draft.style,
         lyrics=result.draft.lyrics,
         chat_id_for_song=chat_id,
+        post_lyrics_on_failure=True,
     )
 
     # Best-effort bookkeeping — record the last successful scheduled run.

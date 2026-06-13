@@ -186,6 +186,32 @@ async def get_song(session: AsyncSession, song_id: int) -> Song | None:
     return await session.get(Song, song_id)
 
 
+async def has_song_on_date(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    day_start_utc: datetime,
+    day_end_utc: datetime,
+) -> bool:
+    """True if a successful song already exists for ``chat_id`` within
+    ``[day_start_utc, day_end_utc)``.
+
+    Used by the scheduled daily-song job to dedupe: a cron misfire +
+    coalesce, a restart-replay, or a manual ``/song_now`` earlier the
+    same day shouldn't produce a second song. We key off the existing
+    ``songs`` table (no separate ``daily_songs`` table in the MVP) —
+    ``created_at`` is the generation timestamp in UTC.
+    """
+    stmt = select(func.count(Song.id)).where(
+        Song.chat_id == chat_id,
+        Song.status == VISIBLE_STATUS,
+        Song.created_at >= day_start_utc,
+        Song.created_at < day_end_utc,
+    )
+    result = await session.execute(stmt)
+    return int(result.scalar() or 0) > 0
+
+
 # ---------- stats ----------
 
 async def song_stats(
