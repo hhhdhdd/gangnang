@@ -23,13 +23,13 @@
 
 | PR | Ветка | Фаза | Описание |
 |----|-------|------|----------|
-| _(пусто)_ | `spec/daily-song` | 0 | Сама спека (этот PR — будет проставлен после `gh pr create`) |
+| [#25](https://github.com/pavlodrab/ideabottg/pull/25) | `spec/daily-song` | 0 | Сама спека (requirements + design + tasks + workflow steering) |
 
 ---
 
 ## Фаза 0 — Спека
 
-- [~] **0.1** Написать requirements / design / tasks + steering `workflow.md` _(этот PR)_
+- [~] **0.1** Написать requirements / design / tasks + steering `workflow.md` _(PR [#25](https://github.com/pavlodrab/ideabottg/pull/25))_
 
 ---
 
