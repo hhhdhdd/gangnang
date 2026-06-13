@@ -272,26 +272,22 @@ def _parse_song_draft(parsed) -> SongDraft:
     )
 
 
-async def llm_make_song_draft(
+async def _llm_draft_with_retries(
     *,
     client: OpenRouterClient,
     model: str,
     system_prompt: str,
-    chat_text: str,
-    target_seconds: int,
-    style_override: str | None = None,
+    user_message: str,
     retries: int = LLM_JSON_RETRIES,
 ) -> SongDraft:
-    """One songwriter LLM call with up-to ``retries`` JSON-parse
-    re-attempts.
+    """Shared songwriter LLM loop: call the model with ``user_message``,
+    parse strict JSON into a :class:`SongDraft`, retry up to ``retries``
+    times on non-JSON / wrong-shape output (re-asking for strict JSON).
 
-    On a non-JSON / wrong-shape response the next attempt re-asks the
-    same question with an extra ``user`` message reminding the model
-    to return strict JSON. Most free-tier models eventually comply.
-    Errors propagate as :class:`SongPipelineError`.
+    Used by both :func:`llm_make_song_draft` (chat-history input) and
+    :func:`prompt_to_song_draft` (user free-text input). Errors propagate
+    as :class:`SongPipelineError`.
     """
-    user_message = _build_user_message(chat_text, target_seconds, style_override)
-
     last_err: Exception | None = None
     for attempt in range(retries):
         messages: list[dict[str, str]] = [
@@ -320,8 +316,6 @@ async def llm_make_song_draft(
                 temperature=LLM_TEMPERATURE,
             )
         except LlmApiError as exc:
-            # Network / 429 / 5xx — retrying probably won't help fast.
-            # Surface immediately so the user sees the real reason.
             raise SongPipelineError(
                 "llm_call_failed",
                 f"OpenRouter: {exc.humanized()}",
@@ -338,9 +332,6 @@ async def llm_make_song_draft(
 
         parsed = result.parse_json()
         if parsed is None:
-            # Some routed models still wrap JSON in ```json fences or add
-            # a leading 'json'. Try a tolerant second pass before
-            # spending another HTTP roundtrip.
             parsed = _tolerant_json_parse(result.text)
 
         if parsed is not None:
@@ -348,18 +339,103 @@ async def llm_make_song_draft(
                 return _parse_song_draft(parsed)
             except SongPipelineError as exc:
                 last_err = exc
-                # fall through to retry — the JSON was valid but had
-                # missing/empty required fields.
                 continue
 
-        last_err = ValueError(
-            f"non-JSON response: {result.text[:200]!r}"
-        )
+        last_err = ValueError(f"non-JSON response: {result.text[:200]!r}")
 
     raise SongPipelineError(
         "llm_invalid_json",
         f"LLM не вернул валидный SongDraft за {retries} "
         f"попытк{'у' if retries == 1 else 'и'}: {last_err}",
+    )
+
+
+async def llm_make_song_draft(
+    *,
+    client: OpenRouterClient,
+    model: str,
+    system_prompt: str,
+    chat_text: str,
+    target_seconds: int,
+    style_override: str | None = None,
+    retries: int = LLM_JSON_RETRIES,
+) -> SongDraft:
+    """Songwriter draft from a day of chat history (daily-song flows)."""
+    user_message = _build_user_message(chat_text, target_seconds, style_override)
+    return await _llm_draft_with_retries(
+        client=client,
+        model=model,
+        system_prompt=system_prompt,
+        user_message=user_message,
+        retries=retries,
+    )
+
+
+def _build_prompt_user_message(
+    user_text: str, target_seconds: int, style_override: str | None = None
+) -> str:
+    """Compose the songwriter user-message for the **user-prompt** flow
+    (``/music <текст> [стиль X]``).
+
+    Unlike the chat-history builder, the input is a single user's idea /
+    rough lyrics. We ask the LLM to turn it into proper song lyrics —
+    fix the rhymes, add structure — while keeping the user's intent,
+    names and jokes. Style is taken verbatim when the user supplied one,
+    otherwise the model picks it from the text's tone.
+    """
+    if style_override:
+        style_block = (
+            f"СТИЛЬ ЗАДАН пользователем — используй именно его:\n"
+            f"\"{style_override.strip()}\"\n\n"
+            "Положи его в поле \"style\" JSON-ответа (можешь перевести на "
+            "английский и добавить уточняющие музыкальные дескрипторы, но "
+            "сохрани суть)."
+        )
+    else:
+        style_block = (
+            "Стиль (style) выбери САМ под смысл и тон текста "
+            "(грустный → indie folk; угарный → pop punk; и т.п.)."
+        )
+
+    return (
+        "Пользователь прислал идею/черновик для песни:\n"
+        "━━━━━━━━━━\n"
+        f"{user_text}\n"
+        "━━━━━━━━━━\n\n"
+        "Преврати это в НАСТОЯЩИЙ текст песни: причеши рифмы, добавь "
+        "структуру (1 куплет + припев + 1 куплет, без длинного outro), "
+        "сохрани имена, шутки и смысл из исходника. Не теряй то, что "
+        "хотел сказать пользователь — улучшай, а не переписывай с нуля. "
+        f"Целевая длительность — около {format_duration_label(target_seconds)} "
+        f"({target_seconds} сек).\n\n"
+        f"{style_block}\n\n"
+        "Верни СТРОГО JSON без markdown, без префикса \"json\", без "
+        "комментариев:\n"
+        "{\"title\": \"...\", \"style\": \"...\", \"lyrics\": \"...\", "
+        "\"summary\": \"...\"}"
+    )
+
+
+async def prompt_to_song_draft(
+    *,
+    client: OpenRouterClient,
+    model: str,
+    system_prompt: str,
+    user_text: str,
+    target_seconds: int,
+    style_override: str | None = None,
+    retries: int = LLM_JSON_RETRIES,
+) -> SongDraft:
+    """Songwriter draft from a single user's free-text idea (``/music``)."""
+    user_message = _build_prompt_user_message(
+        user_text, target_seconds, style_override
+    )
+    return await _llm_draft_with_retries(
+        client=client,
+        model=model,
+        system_prompt=system_prompt,
+        user_message=user_message,
+        retries=retries,
     )
 
 
@@ -401,22 +477,35 @@ async def collect_recent_messages(
     )
 
 
-async def start_song_generation(
+@dataclass
+class DraftBundle:
+    """Everything the LLM half produces — reused by both the manual
+    flow (``start_song_generation``) and the scheduled orchestrator
+    (``daily_song.run_daily_song_for_chat``). Holds the Suno key/model
+    so the caller can submit via either ``SunoApiOrgClient`` directly
+    or a ``SongProvider``."""
+
+    draft: SongDraft
+    n_messages: int
+    llm_model: str
+    suno_model: str
+    suno_key: str
+    callback_url: str
+    target_sec: int
+
+
+async def generate_song_draft(
     *,
     session: AsyncSession,
     chat_id: int,
     requested_by: int | None = None,
     window_hours: int = DEFAULT_WINDOW_HOURS,
     min_messages: int = DEFAULT_MIN_MESSAGES,
-) -> SongGenerationResult:
-    """Run the synchronous half of the pipeline: history → LLM → Suno
-    submit.
+) -> DraftBundle:
+    """History → LLM ``SongDraft`` (no Suno submit).
 
-    The Suno polling step is intentionally split out (see
-    :func:`watch_suno_task`) so the caller can decide where to place
-    the placeholder message and where to deliver the final mp3 — the
-    "request from /musicmenu in DM, post mp3 to the group" flow needs
-    different ``notify_chat_id`` values for placeholder and audio.
+    Raises :class:`SongPipelineError` with a machine code on any
+    refusal (missing key, too few messages, bad LLM JSON).
     """
     # 1. Validate keys.
     suno_key = await get_suno_api_key(session)
@@ -472,7 +561,7 @@ async def start_song_generation(
     callback_url = await get_callback_url(session)
 
     log.info(
-        "song-pipeline: start chat_id=%s n_messages=%s text_chars=%s "
+        "song-pipeline: draft-start chat_id=%s n_messages=%s text_chars=%s "
         "llm=%s suno=%s target_sec=%s style_override=%r requested_by=%s",
         chat_id,
         len(messages),
@@ -502,7 +591,132 @@ async def start_song_generation(
         len(draft.lyrics),
     )
 
-    # 6. Suno submit (customMode so we control title / style / lyrics).
+    return DraftBundle(
+        draft=draft,
+        n_messages=len(messages),
+        llm_model=llm_model,
+        suno_model=suno_model,
+        suno_key=suno_key,
+        callback_url=callback_url,
+        target_sec=target_sec,
+    )
+
+
+async def start_song_generation(
+    *,
+    session: AsyncSession,
+    chat_id: int,
+    requested_by: int | None = None,
+    window_hours: int = DEFAULT_WINDOW_HOURS,
+    min_messages: int = DEFAULT_MIN_MESSAGES,
+) -> SongGenerationResult:
+    """Run the synchronous half of the manual pipeline: history → LLM →
+    Suno submit. Polling is split out (see :func:`watch_suno_task`).
+    """
+    bundle = await generate_song_draft(
+        session=session,
+        chat_id=chat_id,
+        requested_by=requested_by,
+        window_hours=window_hours,
+        min_messages=min_messages,
+    )
+
+    # Suno submit (customMode so we control title / style / lyrics).
+    suno_client = SunoApiOrgClient(bundle.suno_key)
+    try:
+        task_id = await suno_client.generate_music(
+            prompt=bundle.draft.lyrics,
+            model=bundle.suno_model,
+            callback_url=bundle.callback_url,
+            custom_mode=True,
+            instrumental=False,
+            style=bundle.draft.style,
+            title=bundle.draft.title,
+        )
+    except SunoApiError as exc:
+        raise SongPipelineError(
+            "suno_call_failed",
+            f"Suno: {exc.humanized()}",
+        ) from exc
+
+    log.info(
+        "song-pipeline: suno-submit chat_id=%s task_id=%s suno_model=%s",
+        chat_id,
+        task_id,
+        bundle.suno_model,
+    )
+
+    return SongGenerationResult(
+        suno_task_id=task_id,
+        draft=bundle.draft,
+        n_messages=bundle.n_messages,
+        llm_model=bundle.llm_model,
+        suno_model=bundle.suno_model,
+    )
+
+
+async def start_song_from_prompt(
+    *,
+    session: AsyncSession,
+    user_text: str,
+    style_override: str | None = None,
+    requested_by: int | None = None,
+) -> SongGenerationResult:
+    """User-prompt flow (``/music``): free text → LLM-improved lyrics →
+    Suno submit. No chat history involved.
+
+    Validates both API keys, runs the user's text through the songwriter
+    model (rhymes / structure), then submits to Suno in customMode. The
+    caller spawns :func:`watch_suno_task` to deliver the mp3.
+    """
+    suno_key = await get_suno_api_key(session)
+    if not suno_key:
+        raise SongPipelineError(
+            "no_suno_key",
+            "Suno ещё не настроен — попроси админа задать ключ в /musicmenu.",
+        )
+    llm_key = await get_llm_api_key(session)
+    if not llm_key:
+        raise SongPipelineError(
+            "no_llm_key",
+            "OpenRouter ещё не настроен — попроси админа задать ключ.",
+        )
+
+    text = (user_text or "").strip()
+    if not text:
+        raise SongPipelineError(
+            "empty_prompt", "Пустой текст — нечего превращать в песню."
+        )
+
+    target_sec = await get_target_duration_sec(session)
+    llm_model = await get_llm_model(session)
+    referer = await get_llm_referer(session)
+    system_prompt = (
+        await get_llm_system_prompt(session)
+    ) or DEFAULT_SONGWRITER_SYSTEM_PROMPT
+    suno_model = await get_suno_model(session)
+    callback_url = await get_callback_url(session)
+
+    log.info(
+        "song-pipeline: prompt-gen text_chars=%s style_override=%r "
+        "llm=%s suno=%s requested_by=%s",
+        len(text),
+        (style_override or "")[:40] or None,
+        llm_model,
+        suno_model,
+        requested_by,
+    )
+
+    or_client = OpenRouterClient(llm_key, referer=referer)
+    draft = await prompt_to_song_draft(
+        client=or_client,
+        model=llm_model,
+        system_prompt=system_prompt,
+        user_text=text,
+        target_seconds=target_sec,
+        style_override=style_override,
+    )
+
     suno_client = SunoApiOrgClient(suno_key)
     try:
         task_id = await suno_client.generate_music(
@@ -521,8 +735,7 @@ async def start_song_generation(
         ) from exc
 
     log.info(
-        "song-pipeline: suno-submit chat_id=%s task_id=%s suno_model=%s",
-        chat_id,
+        "song-pipeline: prompt suno-submit task_id=%s suno_model=%s",
         task_id,
         suno_model,
     )
@@ -530,7 +743,7 @@ async def start_song_generation(
     return SongGenerationResult(
         suno_task_id=task_id,
         draft=draft,
-        n_messages=len(messages),
+        n_messages=0,
         llm_model=llm_model,
         suno_model=suno_model,
     )
@@ -554,6 +767,7 @@ async def watch_suno_task(
     style: str | None = None,
     lyrics: str | None = None,
     chat_id_for_song: int | None = None,
+    post_lyrics_on_failure: bool = False,
     timeout_sec: int = TASK_TIMEOUT_SEC,
     poll_interval_sec: int = TASK_POLL_INTERVAL_SEC,
 ) -> None:
@@ -609,6 +823,7 @@ async def watch_suno_task(
                 style=style,
                 lyrics=lyrics,
                 chat_id_for_song=chat_id_for_song,
+                post_lyrics_on_failure=post_lyrics_on_failure,
             )
             return
 
@@ -629,6 +844,41 @@ async def watch_suno_task(
             chat_id=placeholder_chat_id,
             message_id=placeholder_message_id,
         )
+    # Lyrics-only fallback (F5.4): the daily-song flow still wants the
+    # chat to get *something* when Suno is slow. Post the LLM lyrics so
+    # the song-of-the-day lands as text even without the mp3.
+    if post_lyrics_on_failure and lyrics:
+        await _post_lyrics_only(
+            bot, audio_chat_id, title=title, style=style, lyrics=lyrics
+        )
+
+
+async def _post_lyrics_only(
+    bot: Bot,
+    chat_id: int,
+    *,
+    title: str | None,
+    style: str | None,
+    lyrics: str,
+) -> None:
+    """Lyrics-only fallback post (F5.4) when Suno didn't deliver an mp3.
+
+    Best-effort: wrapped by the caller's flow so a send failure here
+    never crashes the pipeline.
+    """
+    head = f"🎵 <b>Песня дня (только текст — Suno не справился)</b>"
+    if title:
+        head += f"\n<b>{html.escape(title)}</b>"
+    if style:
+        head += f"\n🎨 <i>{html.escape(style[:120])}</i>"
+    with contextlib.suppress(Exception):
+        await bot.send_message(chat_id, head, disable_web_page_preview=True)
+    with contextlib.suppress(Exception):
+        await bot.send_message(
+            chat_id,
+            f"<pre>{html.escape(lyrics)[:3500]}</pre>",
+            disable_web_page_preview=True,
+        )
 
 
 async def handle_terminal(
@@ -646,6 +896,7 @@ async def handle_terminal(
     style: str | None = None,
     lyrics: str | None = None,
     chat_id_for_song: int | None = None,
+    post_lyrics_on_failure: bool = False,
 ) -> None:
     """Persist a ``Song`` row, update the placeholder, deliver mp3.
 
@@ -722,6 +973,16 @@ async def handle_terminal(
 
         # 3. Deliver mp3 + capture file_id.
         if snapshot.audio_url:
+            # Cover art (6.3): Suno returns an image_url for the track.
+            # Post it as a photo right before the audio so the song
+            # lands with a visual. Best-effort — never blocks the mp3.
+            if snapshot.image_url:
+                with contextlib.suppress(Exception):
+                    await bot.send_photo(
+                        audio_chat_id,
+                        photo=snapshot.image_url,
+                        caption=f"🎵 {html.escape(display_title)}",
+                    )
             caption_lines = [f"🎵 {html.escape(display_title)}"]
             if effective_style:
                 caption_lines.append(
@@ -798,115 +1059,11 @@ async def handle_terminal(
             chat_id=placeholder_chat_id,
             message_id=placeholder_message_id,
         )
-
-
-# ---------- step 5: scheduled (headless) flow ----------
-
-
-async def run_scheduled_song_for_chat(bot: Bot, chat_id: int) -> None:
-    """Cron entry point: generate the song-of-the-day for one chat and
-    post it **into that same chat**.
-
-    Differences from the manual ``/song_now`` flow:
-
-    - No admin DM. The status placeholder and the final mp3 both live
-      in the target group (``placeholder_chat_id == audio_chat_id``).
-    - ``requested_by`` is ``None`` — there's no human behind it.
-    - On ``too_few_messages`` we skip **silently** (just a log line).
-      Posting "не хватило сообщений" into the group every quiet day
-      would be spam; the absence of a song is signal enough.
-    - We do the LLM + Suno-submit work *before* posting anything, so a
-      quiet day or a misconfiguration never leaves a dangling
-      "готовлю…" message in the group.
-
-    Runs to completion (awaits the Suno poll, up to ``TASK_TIMEOUT_SEC``)
-    so APScheduler's ``max_instances=1`` / ``coalesce`` semantics keep
-    overlapping fires from stacking.
-    """
-    async with SessionLocal() as session:
-        chat = await session.get(Chat, chat_id)
-        if chat is None:
-            log.info("scheduled-song: chat %s gone, skipping", chat_id)
-            return
-        if not chat.is_active or not chat.song_enabled:
-            log.info(
-                "scheduled-song: chat %s not active/enabled, skipping",
-                chat_id,
-            )
-            return
-
-        try:
-            result = await start_song_generation(
-                session=session,
-                chat_id=chat_id,
-                requested_by=None,
-            )
-        except SongPipelineError as exc:
-            if exc.code == "too_few_messages":
-                log.info(
-                    "scheduled-song: chat %s too few messages, skipping "
-                    "silently",
-                    chat_id,
-                )
-            else:
-                log.warning(
-                    "scheduled-song: chat %s refused code=%s msg=%s",
-                    chat_id,
-                    exc.code,
-                    exc.msg,
-                )
-            return
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "scheduled-song: unexpected error for chat %s", chat_id
-            )
-            return
-
-        suno_key = await get_suno_api_key(session)
-        if not suno_key:
-            log.warning(
-                "scheduled-song: suno key vanished mid-run for chat %s",
-                chat_id,
-            )
-            return
-
-    # Generation accepted by Suno — now it's worth telling the group.
-    try:
-        placeholder = await bot.send_message(
-            chat_id,
-            "🎵 <b>Песня дня готовится…</b>\n"
-            f"📊 По {result.n_messages} сообщениям за сутки.\n"
-            "Обычно занимает 2–3 минуты.",
+    # Lyrics-only fallback (F5.4) for the daily-song flow.
+    if post_lyrics_on_failure and lyrics:
+        await _post_lyrics_only(
+            bot, audio_chat_id, title=title, style=style, lyrics=lyrics
         )
-    except Exception:  # noqa: BLE001
-        log.exception(
-            "scheduled-song: can't post placeholder to chat %s", chat_id
-        )
-        return
-
-    await watch_suno_task(
-        bot=bot,
-        api_key=suno_key,
-        task_id=result.suno_task_id,
-        placeholder_chat_id=chat_id,
-        placeholder_message_id=placeholder.message_id,
-        audio_chat_id=chat_id,
-        requested_by=None,
-        suno_model=result.suno_model,
-        prompt=result.draft.lyrics,
-        title=result.draft.title,
-        style=result.draft.style,
-        lyrics=result.draft.lyrics,
-        chat_id_for_song=chat_id,
-    )
-
-    # Best-effort bookkeeping — record the last successful scheduled run.
-    with contextlib.suppress(Exception):
-        async with SessionLocal() as session:
-            chat = await session.get(Chat, chat_id)
-            if chat is not None:
-                chat.last_song_sent_at = datetime.now(timezone.utc)
-                await session.commit()
 
 
 __all__ = [
@@ -917,10 +1074,13 @@ __all__ = [
     "SongGenerationResult",
     "SongPipelineError",
     "build_chat_text",
+    "DraftBundle",
     "collect_recent_messages",
     "handle_terminal",
+    "generate_song_draft",
     "llm_make_song_draft",
-    "run_scheduled_song_for_chat",
+    "prompt_to_song_draft",
+    "start_song_from_prompt",
     "start_song_generation",
     "trim_chat_text",
     "watch_suno_task",
