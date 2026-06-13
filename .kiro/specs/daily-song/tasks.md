@@ -43,7 +43,7 @@
 | [#31](https://github.com/pavlodrab/ideabottg/pull/31) | `feat/song-stats-purge` | 5 | `/song_stats` + `/song_purge` (OWNER, с подтверждением); стек поверх PR #30 |
 | [#32](https://github.com/pavlodrab/ideabottg/pull/32) | `feat/song-dedup-fallback-tests` | F · 4 · 6 | dedup по дню + LyricsOnly fallback + обложка mp3 + pytest smoke-сьют; стек поверх PR #31 |
 | [#33](https://github.com/pavlodrab/ideabottg/pull/33) | `feat/daily-songs-ledger` | 4 · 5.3 | ledger `daily_songs` (миграция 0009 + модель) + provider-абстракция `song_provider.py` + оркестратор `daily_song.py` + sweep `stale_on_restart`; стек поверх PR #32 |
-| _TBD_ | `feat/public-music-command` | H | публичная `/music <текст> [стиль]` — LLM причёсывает рифмы + Suno, mp3 в чат; стек поверх PR #33 |
+| [#34](https://github.com/pavlodrab/ideabottg/pull/34) | `feat/public-music-command` | H | публичная `/music <текст> [стиль]` — LLM причёсывает рифмы + Suno, mp3 в чат; стек поверх PR #33 |
 
 ---
 
@@ -400,7 +400,7 @@ MVP без scheduler — только manual trigger из меню или ком
 
 ## Фаза H — Публичная `/music` (песня по тексту пользователя)
 
-> **Все задачи ниже — в открытом PR (`feat/public-music-command`), стек поверх PR #33.** После мерджа `[~]` → `[x]`.
+> **Все задачи ниже — в [PR #34](https://github.com/pavlodrab/ideabottg/pull/34) (`feat/public-music-command`), стек поверх PR #33.** После мерджа `[~]` → `[x]`.
 
 Запрошено владельцем:
 > «Надо сделать чтобы генерил песню по запросам юзеров и по их промптам,
@@ -414,9 +414,9 @@ OpenRouter (причёсывает рифмы, добавляет структу
 имена). Стиль — опционально в конце команды; без него модель выбирает
 сама по тону.
 
-- [~] **H.1** `song_pipeline`: вынесен общий `_llm_draft_with_retries`; добавлены `_build_prompt_user_message`, `prompt_to_song_draft` (улучшение текста → `SongDraft`) и сервис `start_song_from_prompt` (ключи → LLM → Suno submit). _(PR `feat/public-music-command`)_
-- [~] **H.2** `app/handlers/song_admin.py::cmd_music` — публичная `/music` (group + DM, без admin-gate): `parse_music_command` (маркеры `стиль` / `в стиле` / `style`), per-user in-memory cooldown (180 c) + лимит длины 800, placeholder → `watch_suno_task` (mp3 в тот же чат, обложка/lyrics/fallback из общего кода). _(PR `feat/public-music-command`)_
-- [~] **H.3** Тесты `tests/test_music_command.py`: парсер стиля (incl. last-marker / no-idea кейсы) + содержимое prompt-сообщения. _(PR `feat/public-music-command`)_
+- [~] **H.1** `song_pipeline`: вынесен общий `_llm_draft_with_retries`; добавлены `_build_prompt_user_message`, `prompt_to_song_draft` (улучшение текста → `SongDraft`) и сервис `start_song_from_prompt` (ключи → LLM → Suno submit). _(PR [#34](https://github.com/pavlodrab/ideabottg/pull/34))_
+- [~] **H.2** `app/handlers/song_admin.py::cmd_music` — публичная `/music` (group + DM, без admin-gate): `parse_music_command` (маркеры `стиль` / `в стиле` / `style`), per-user in-memory cooldown (180 c) + лимит длины 800, placeholder → `watch_suno_task` (mp3 в тот же чат, обложка/lyrics/fallback из общего кода). _(PR [#34](https://github.com/pavlodrab/ideabottg/pull/34))_
+- [~] **H.3** Тесты `tests/test_music_command.py`: парсер стиля (incl. last-marker / no-idea кейсы) + содержимое prompt-сообщения. _(PR [#34](https://github.com/pavlodrab/ideabottg/pull/34))_
 
 **Definition of done фазы H**:
 1. `/music Андрюха крутой стиль панк` → через 2–3 мин mp3 в чате, стиль панк.
