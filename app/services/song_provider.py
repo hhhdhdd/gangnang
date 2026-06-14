@@ -95,15 +95,28 @@ class SunoApiOrgProvider:
         self._callback_url = callback_url
 
     async def submit(self, draft: SongDraft) -> str:
-        return await self._client.generate_music(
-            prompt=draft.lyrics,
-            model=self._model,
-            callback_url=self._callback_url,
-            custom_mode=True,
-            instrumental=False,
-            style=draft.style,
-            title=draft.title,
-        )
+        # Route through generate_with_rotation so an out-of-credits (429)
+        # on the active key immediately disables it and retries the next
+        # key — same behaviour as the /music flow. Uses a short-lived
+        # session because the orchestrator's session is already closed by
+        # the time submit runs.
+        from app.db import SessionLocal
+        from app.services.suno import generate_with_rotation
+
+        async with SessionLocal() as session:
+            task_id, used_key = await generate_with_rotation(
+                session,
+                prompt=draft.lyrics,
+                model=self._model,
+                callback_url=self._callback_url,
+                custom_mode=True,
+                instrumental=False,
+                style=draft.style,
+                title=draft.title,
+            )
+        # Poll with the key that actually accepted the task.
+        self._client = SunoApiOrgClient(used_key)
+        return task_id
 
     async def poll(self, task_id: str) -> SongResult | None:
         snapshot: TaskSnapshot = await self._client.get_task(task_id)

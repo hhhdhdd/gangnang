@@ -229,6 +229,25 @@ async def _set_active(session: AsyncSession, key_id: int) -> None:
     await session.commit()
 
 
+async def set_active_key(session: AsyncSession, key_id: int) -> bool:
+    """Manually force a key active (and re-enable it).
+
+    Used by the "tap a key to use it" button so the owner can override
+    rotation — e.g. switch to a key they just topped up, or retry a key
+    that was auto-disabled at 0 credits. Returns False if the id is gone.
+    """
+    from app.models import SunoKey
+
+    row = await session.get(SunoKey, key_id)
+    if row is None:
+        return False
+    await session.execute(update(SunoKey).values(is_active=False))
+    row.is_active = True
+    row.enabled = True  # manual pick re-enables a previously dead key
+    await session.commit()
+    return True
+
+
 async def get_active_key(session: AsyncSession) -> str | None:
     """Return the api_key string of the active usable key, or None.
 
