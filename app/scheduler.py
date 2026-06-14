@@ -25,12 +25,19 @@ PROMPT_PREFIX = "prompt:"
 DIGEST_PREFIX = "digest:"
 SONG_PREFIX = "song:"
 RETENTION_JOB_ID = "retention:chat_messages"
+SUNO_CREDITS_JOB_ID = "suno:credits_refresh"
 
 # Cron expression for the chat-messages retention sweep. "5 * * * *"
 # runs every hour at xx:05 — staggered slightly off the top of the
 # hour so it doesn't collide with prompts that typically schedule on
 # the hour exactly.
 RETENTION_CRON = "5 * * * *"
+
+# Suno credit refresh: every 30 min. Checks each enabled key's balance,
+# caches it, disables keys at 0, and rotates the active key off if it's
+# below the low-credit threshold — so a key runs dry between songs, not
+# mid-generation.
+SUNO_CREDITS_CRON = "*/30 * * * *"
 
 
 def _prompt_job_id(chat_id: int) -> str:
@@ -116,6 +123,8 @@ class IdeaScheduler:
         # Always-on housekeeping: prune chat_messages older than the
         # retention window every hour.
         self._schedule_retention()
+        # Periodic Suno credit refresh + key rotation.
+        self._schedule_suno_credits()
 
         self._scheduler.start()
         log.info(
@@ -356,3 +365,41 @@ class IdeaScheduler:
                 deleted,
                 cutoff.isoformat(),
             )
+
+    # ---------- suno credit refresh + rotation ----------
+
+    def _schedule_suno_credits(self) -> None:
+        """Every 30 min: refresh each Suno key's balance and rotate the
+        active key off if it's below the low-credit threshold."""
+        try:
+            trigger = CronTrigger.from_crontab(
+                SUNO_CREDITS_CRON, timezone=settings.tz
+            )
+        except ValueError as exc:
+            log.error("invalid suno-credits cron %r: %s", SUNO_CREDITS_CRON, exc)
+            return
+        self._scheduler.add_job(
+            self._run_suno_credits,
+            trigger=trigger,
+            id=SUNO_CREDITS_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+        log.info("scheduled suno credit refresh every 30 min")
+
+    async def _run_suno_credits(self) -> None:
+        from app.services.suno import refresh_all_credits
+
+        async with SessionLocal() as session:
+            try:
+                results = await refresh_all_credits(session)
+            except Exception:  # noqa: BLE001
+                log.exception("suno credit refresh failed")
+                return
+        if results:
+            summary = ", ".join(
+                f"{masked}:{credits}" for masked, credits in results
+            )
+            log.info("suno credits refreshed — %s", summary)

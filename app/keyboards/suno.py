@@ -11,33 +11,26 @@ from app.services.suno import (
     MODEL_LABELS,
     SUPPORTED_MODELS,
     format_duration_label,
+    mask_key,
 )
 
 
 def suno_menu_keyboard(
-    *, has_api_key: bool, current_model: str, target_duration_sec: int
+    *, key_count: int, current_model: str, target_duration_sec: int
 ) -> InlineKeyboardMarkup:
     """Main Suno menu shown on `/suno` and from the home keyboard."""
     rows: list[list[InlineKeyboardButton]] = []
 
-    if has_api_key:
+    if key_count > 0:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="🔑 Сменить API-ключ",
-                    callback_data="suno:set_key",
-                )
-            ]
-        )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="💰 Остаток кредитов",
-                    callback_data="suno:credits",
+                    text=f"🔑 Ключи ({key_count})",
+                    callback_data="suno:keys",
                 ),
                 InlineKeyboardButton(
-                    text="🗑 Удалить ключ",
-                    callback_data="suno:remove_key",
+                    text="💰 Кредиты",
+                    callback_data="suno:credits",
                 ),
             ]
         )
@@ -45,8 +38,8 @@ def suno_menu_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="🔑 Задать API-ключ",
-                    callback_data="suno:set_key",
+                    text="🔑 Добавить API-ключ",
+                    callback_data="suno:key_add",
                 )
             ]
         )
@@ -67,7 +60,7 @@ def suno_menu_keyboard(
         ]
     )
 
-    if has_api_key:
+    if key_count > 0:
         rows.append(
             [
                 InlineKeyboardButton(
@@ -79,6 +72,51 @@ def suno_menu_keyboard(
 
     rows.append(
         [InlineKeyboardButton(text="🏠 Меню", callback_data="mm:home")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def suno_keys_keyboard(keys) -> InlineKeyboardMarkup:
+    """List of Suno keys in the rotation pool with per-key remove,
+    plus add / refresh-credits actions.
+
+    Markers: ✅ active · ▫️ standby (enabled) · 🔴 disabled (out of
+    credits). Credits show the last cached balance (``?`` if never
+    checked)."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for k in keys:
+        if k.is_active:
+            marker = "✅"
+        elif not k.enabled:
+            marker = "🔴"
+        else:
+            marker = "▫️"
+        cred = "?" if k.last_credits is None else str(k.last_credits)
+        label = (k.label + " ") if k.label else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{marker} {label}{mask_key(k.api_key)} · {cred}кр"[:64],
+                    callback_data=f"suno:key_info:{k.id}",
+                ),
+                InlineKeyboardButton(
+                    text="🗑",
+                    callback_data=f"suno:key_del:{k.id}",
+                ),
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="➕ Добавить ключ", callback_data="suno:key_add"
+            ),
+            InlineKeyboardButton(
+                text="🔄 Обновить кредиты", callback_data="suno:keys_refresh"
+            ),
+        ]
+    )
+    rows.append(
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="suno:home")]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

@@ -31,7 +31,7 @@ from app.services.song_pipeline import SongDraft
 from app.services.suno import (
     SunoApiOrgClient,
     TaskSnapshot,
-    get_api_key as get_suno_api_key,
+    ensure_usable_key,
     get_callback_url,
     get_model as get_suno_model,
 )
@@ -150,7 +150,7 @@ async def get_song_provider(session: AsyncSession) -> SongProvider:
             "self_hosted provider не сконфигурирован (нет SUNO_API_BASE-обёртки)"
         )
     # default: sunoapi_org
-    api_key = await get_suno_api_key(session)
+    api_key = await ensure_usable_key(session)
     if not api_key:
         raise SongProviderError("Suno API-ключ не задан")
     model = await get_suno_model(session)

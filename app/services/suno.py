@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.settings import (
@@ -110,18 +112,271 @@ ERROR_CODE_HINTS: dict[int, str] = {
 }
 
 
+LOW_CREDIT_THRESHOLD = 10  # rotate to another key when active drops below this
+
+
 # ---------- DB-backed config helpers ----------
 
+async def _migrate_legacy_key(session: AsyncSession) -> None:
+    """One-time: move a legacy single key from ``settings['suno.api_key']``
+    into the ``suno_keys`` table, then drop the setting. No-op once done."""
+    from app.models import SunoKey
+
+    legacy = await get_setting(session, KEY_API_KEY)
+    if not legacy:
+        return
+    legacy = legacy.strip()
+    exists = (
+        await session.execute(
+            select(SunoKey).where(SunoKey.api_key == legacy)
+        )
+    ).scalar_one_or_none()
+    if exists is None:
+        has_active = (
+            await session.execute(
+                select(SunoKey).where(SunoKey.is_active.is_(True))
+            )
+        ).scalar_one_or_none()
+        session.add(
+            SunoKey(
+                api_key=legacy,
+                label="migrated",
+                is_active=has_active is None,
+                enabled=True,
+            )
+        )
+    await delete_setting(session, KEY_API_KEY)
+    await session.commit()
+
+
+async def list_keys(session: AsyncSession) -> list:
+    """All keys, oldest-first. Migrates the legacy key on first call."""
+    from app.models import SunoKey
+
+    await _migrate_legacy_key(session)
+    res = await session.execute(
+        select(SunoKey).order_by(SunoKey.created_at.asc(), SunoKey.id.asc())
+    )
+    return list(res.scalars().all())
+
+
+async def add_key(
+    session: AsyncSession, api_key: str, *, label: str | None = None
+):
+    """Add a key to the pool (or re-enable it if already present).
+
+    The first key added becomes active; later keys join as standby and
+    only take over when rotation picks them.
+    """
+    from app.models import SunoKey
+
+    await _migrate_legacy_key(session)
+    api_key = api_key.strip()
+    existing = (
+        await session.execute(
+            select(SunoKey).where(SunoKey.api_key == api_key)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        existing.enabled = True
+        if label:
+            existing.label = label
+        await session.commit()
+        await session.refresh(existing)
+        return existing
+
+    has_active = (
+        await session.execute(
+            select(SunoKey).where(
+                SunoKey.is_active.is_(True), SunoKey.enabled.is_(True)
+            )
+        )
+    ).scalar_one_or_none()
+    row = SunoKey(
+        api_key=api_key,
+        label=label,
+        enabled=True,
+        is_active=has_active is None,
+    )
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+async def remove_key(session: AsyncSession, key_id: int) -> bool:
+    """Delete a key. If it was active, promote another enabled key."""
+    from app.models import SunoKey
+
+    row = await session.get(SunoKey, key_id)
+    if row is None:
+        return False
+    was_active = row.is_active
+    await session.delete(row)
+    await session.commit()
+    if was_active:
+        await get_active_key(session)  # re-elects an active key
+    return True
+
+
+async def _set_active(session: AsyncSession, key_id: int) -> None:
+    from app.models import SunoKey
+
+    await session.execute(update(SunoKey).values(is_active=False))
+    row = await session.get(SunoKey, key_id)
+    if row is not None:
+        row.is_active = True
+    await session.commit()
+
+
+async def get_active_key(session: AsyncSession) -> str | None:
+    """Return the api_key string of the active usable key, or None.
+
+    Elects one if none is marked active. This is what every caller
+    (indicators, generation, provider) goes through — so adding keys /
+    rotation is transparent to them.
+    """
+    from app.models import SunoKey
+
+    await _migrate_legacy_key(session)
+    active = (
+        await session.execute(
+            select(SunoKey).where(
+                SunoKey.is_active.is_(True), SunoKey.enabled.is_(True)
+            )
+        )
+    ).scalar_one_or_none()
+    if active is not None:
+        return active.api_key
+    # elect the first enabled key
+    nxt = (
+        await session.execute(
+            select(SunoKey)
+            .where(SunoKey.enabled.is_(True))
+            .order_by(SunoKey.created_at.asc(), SunoKey.id.asc())
+        )
+    ).scalars().first()
+    if nxt is None:
+        return None
+    await _set_active(session, nxt.id)
+    return nxt.api_key
+
+
+def _credit_rank(value: int | None) -> int:
+    """Sort key: unknown credits (None) rank highest so freshly added,
+    unchecked keys get tried before keys known to be low."""
+    return 10**9 if value is None else value
+
+
+async def rotate_active(
+    session: AsyncSession, *, disable_current: bool = False
+) -> str | None:
+    """Switch the active key to the best other enabled key.
+
+    Picks the enabled candidate with the most (known) credits; unknown
+    balances are treated as high so untried keys get a chance. When
+    ``disable_current`` is set (e.g. current key is out of credits), the
+    current key is marked disabled so it won't be re-elected.
+    Returns the newly active api_key, or None if nothing usable remains.
+    """
+    from app.models import SunoKey
+
+    await _migrate_legacy_key(session)
+    cur = (
+        await session.execute(
+            select(SunoKey).where(SunoKey.is_active.is_(True))
+        )
+    ).scalar_one_or_none()
+    if cur is not None and disable_current:
+        cur.enabled = False
+        cur.is_active = False
+        await session.commit()
+
+    cur_id = cur.id if cur is not None else None
+    candidates = list(
+        (
+            await session.execute(
+                select(SunoKey).where(SunoKey.enabled.is_(True))
+            )
+        ).scalars().all()
+    )
+    candidates = [c for c in candidates if c.id != cur_id]
+    if not candidates:
+        # nothing better; keep current if it's still usable
+        if cur is not None and cur.enabled:
+            return cur.api_key
+        return None
+    best = max(candidates, key=lambda c: _credit_rank(c.last_credits))
+    await _set_active(session, best.id)
+    return best.api_key
+
+
+async def ensure_usable_key(
+    session: AsyncSession, *, threshold: int = LOW_CREDIT_THRESHOLD
+) -> str | None:
+    """Return the active key, proactively rotating (using cached credit
+    counts — no network call) if it's known to be below ``threshold``."""
+    from app.models import SunoKey
+
+    key = await get_active_key(session)
+    if key is None:
+        return None
+    cur = (
+        await session.execute(
+            select(SunoKey).where(SunoKey.is_active.is_(True))
+        )
+    ).scalar_one_or_none()
+    if (
+        cur is not None
+        and cur.last_credits is not None
+        and cur.last_credits < threshold
+    ):
+        rotated = await rotate_active(session)
+        if rotated is not None:
+            return rotated
+    return key
+
+
+async def set_key_credits(
+    session: AsyncSession, key_id: int, credits: int | None
+) -> None:
+    from app.models import SunoKey
+
+    row = await session.get(SunoKey, key_id)
+    if row is None:
+        return
+    row.last_credits = credits
+    row.last_checked_at = datetime.now(timezone.utc)
+    if credits is not None and credits <= 0:
+        row.enabled = False
+        row.is_active = False
+    await session.commit()
+
+
+# Backwards-compatible single-key helpers (now backed by the pool).
+
 async def get_api_key(session: AsyncSession) -> str | None:
-    return await get_setting(session, KEY_API_KEY)
+    """The active usable Suno key (multi-key aware; legacy-migrating)."""
+    return await get_active_key(session)
 
 
 async def set_api_key(session: AsyncSession, key: str) -> None:
-    await set_setting(session, KEY_API_KEY, key.strip())
+    """Add a key to the pool (legacy callers that 'set the key')."""
+    await add_key(session, key)
 
 
 async def clear_api_key(session: AsyncSession) -> bool:
-    return await delete_setting(session, KEY_API_KEY)
+    """Remove ALL keys from the pool. Returns True if anything was removed."""
+    from app.models import SunoKey
+
+    rows = list((await session.execute(select(SunoKey))).scalars().all())
+    if not rows:
+        # also clear any lingering legacy setting
+        return await delete_setting(session, KEY_API_KEY)
+    for row in rows:
+        await session.delete(row)
+    await session.commit()
+    return True
 
 
 async def get_model(session: AsyncSession) -> str:
@@ -459,3 +714,109 @@ def _to_float(v: Any) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+# ---------- multi-key: credit refresh + rotation-aware submit ----------
+
+
+async def refresh_all_credits(session: AsyncSession) -> list[tuple[str, int | None]]:
+    """Query the live balance of every enabled key, cache it, disable
+    keys at 0, and proactively rotate if the active key is now low.
+
+    Called by the scheduler job. Returns ``[(masked_key, credits|None)]``
+    for logging / UI. Network errors leave a key's cached value intact.
+    """
+    from app.models import SunoKey
+
+    await _migrate_legacy_key(session)
+    rows = list(
+        (
+            await session.execute(
+                select(SunoKey).where(SunoKey.enabled.is_(True))
+            )
+        ).scalars().all()
+    )
+    out: list[tuple[str, int | None]] = []
+    for row in rows:
+        try:
+            credits = await SunoApiOrgClient(row.api_key).get_credits()
+        except SunoApiError as exc:
+            log.warning(
+                "suno credit refresh failed for %s: %s",
+                mask_key(row.api_key),
+                exc,
+            )
+            out.append((mask_key(row.api_key), row.last_credits))
+            continue
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "suno credit refresh unexpected for %s: %s",
+                mask_key(row.api_key),
+                exc,
+            )
+            out.append((mask_key(row.api_key), row.last_credits))
+            continue
+        row.last_credits = credits
+        row.last_checked_at = datetime.now(timezone.utc)
+        if credits <= 0:
+            row.enabled = False
+            row.is_active = False
+        out.append((mask_key(row.api_key), credits))
+    await session.commit()
+    # Proactively switch off a low (but not dead) active key.
+    await ensure_usable_key(session)
+    return out
+
+
+async def generate_with_rotation(
+    session: AsyncSession,
+    *,
+    prompt: str,
+    model: str,
+    callback_url: str,
+    custom_mode: bool = False,
+    instrumental: bool = False,
+    style: str | None = None,
+    title: str | None = None,
+    max_attempts: int = 3,
+) -> tuple[str, str]:
+    """Submit a generation, rotating keys on out-of-credits.
+
+    Picks the active key (proactively rotating if it's cached-low), then
+    on a 429 ("no credits") disables that key and retries with the next
+    enabled one, up to ``max_attempts`` keys. Returns
+    ``(task_id, used_api_key)``. Raises :class:`SunoApiError` if no key
+    works.
+    """
+    last_exc: SunoApiError | None = None
+    for _ in range(max_attempts):
+        key = await ensure_usable_key(session)
+        if not key:
+            raise SunoApiError(0, "нет доступных Suno-ключей (добавь в /suno)")
+        try:
+            task_id = await SunoApiOrgClient(key).generate_music(
+                prompt=prompt,
+                model=model,
+                callback_url=callback_url,
+                custom_mode=custom_mode,
+                instrumental=instrumental,
+                style=style,
+                title=title,
+            )
+            return task_id, key
+        except SunoApiError as exc:
+            last_exc = exc
+            # 429 = out of credits on this key → disable it and rotate.
+            if exc.code == 429:
+                nxt = await rotate_active(session, disable_current=True)
+                log.info(
+                    "suno: key %s out of credits, rotated to %s",
+                    mask_key(key),
+                    mask_key(nxt) if nxt else "(none)",
+                )
+                if nxt and nxt != key:
+                    continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise SunoApiError(0, "rotation exhausted")
