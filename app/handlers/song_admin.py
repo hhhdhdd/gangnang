@@ -72,7 +72,7 @@ MUSIC_MAX_LEN = 800
 # Per-chat daily cap on /music songs (counts everything the chat
 # produced today — manual /music + scheduled daily song). Caps total
 # Suno spend per chat regardless of how many users pile in.
-MUSIC_CHAT_DAILY_LIMIT = 3
+MUSIC_CHAT_DAILY_LIMIT = 10
 _last_music_at: dict[int, float] = {}
 # In-flight /music generations per chat (the Song row only lands ~3 min
 # later, so the persisted count alone would let a burst slip through).
