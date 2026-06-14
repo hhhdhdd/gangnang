@@ -68,3 +68,21 @@ def test_lyrics_quote_truncates_long():
     q = _lyrics_quote("x" * 9000)
     # capped well under Telegram's 4096-char message limit
     assert len(q) < 4096
+
+
+def test_photo_caption_has_title_style_and_quoted_lyrics():
+    from app.services.song_pipeline import build_photo_caption
+
+    cap = build_photo_caption("Тяжёлая судьба", "depressive rock", "[Verse]\nтекст")
+    assert "Тяжёлая судьба" in cap
+    assert "depressive rock" in cap
+    assert "<blockquote expandable>" in cap
+    assert "текст" in cap
+
+
+def test_photo_caption_within_limit():
+    from app.services.song_pipeline import build_photo_caption, CAPTION_LIMIT
+
+    cap = build_photo_caption("T", "S", "ля " * 2000)
+    assert len(cap) <= CAPTION_LIMIT
+    assert cap.endswith("</blockquote>")
