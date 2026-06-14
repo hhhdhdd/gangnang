@@ -68,4 +68,4 @@ def test_inflight_counter_inc_dec():
 def test_music_chat_daily_limit_constant():
     from app.handlers import song_admin as sa
 
-    assert sa.MUSIC_CHAT_DAILY_LIMIT == 3
+    assert sa.MUSIC_CHAT_DAILY_LIMIT == 10
