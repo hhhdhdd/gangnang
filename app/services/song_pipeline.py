@@ -808,6 +808,34 @@ def _lyrics_quote(lyrics: str) -> str:
     )
 
 
+def build_photo_caption(
+    title: str | None,
+    style: str | None,
+    lyrics: str | None,
+    *,
+    limit: int = CAPTION_LIMIT,
+) -> str:
+    """Caption for the cover photo: title + style + lyrics as an
+    expandable (collapsible) blockquote, trimmed to the caption limit.
+
+    Lets the whole song land in TWO messages (photo-with-everything +
+    audio) instead of three. Length is measured on the raw HTML (tags
+    included) — conservative, so it never overflows Telegram's count."""
+    head = f"🎵 <b>{html.escape(title or '(без названия)')}</b>"
+    if style:
+        head += f"\n🎨 <i>{html.escape(style[:120])}</i>"
+    if not lyrics:
+        return head[:limit]
+    open_t, close_t = "<blockquote expandable>", "</blockquote>"
+    budget = limit - len(head) - len("\n\n") - len(open_t) - len(close_t) - 1
+    if budget <= 0:
+        return head[:limit]
+    body = html.escape(lyrics)
+    if len(body) > budget:
+        body = body[:budget].rstrip() + "…"
+    return f"{head}\n\n{open_t}{body}{close_t}"
+
+
 def _make_thumbnail(data: bytes) -> bytes | None:
     """Resize cover art to a Telegram-legal audio thumbnail (≤320px
     JPEG, ≤200 KB). Returns None if Pillow is missing or the image is
@@ -852,24 +880,32 @@ async def deliver_song(
 ):
     """Deliver a finished song:
 
-    1. a **visible cover photo** (separate message — a real photo, not
-       just the tiny audio thumbnail);
-    2. the audio (caption = title + style; cover also embedded as the
-       player thumbnail when Pillow can build one);
-    3. the lyrics as a **collapsible (expandable) blockquote**.
+    1. a **cover photo** whose caption carries title + style + the
+       lyrics as a collapsible blockquote (when a cover exists);
+    2. the audio (caption = title + style, cover also as the player
+       thumbnail).
 
-    Every step is best-effort: a failure in one never blocks the others.
-    Returns the sent audio ``Message`` (for ``file_id`` capture) or None.
+    That's **two messages** total. When there's no cover image, it
+    degrades to audio + a separate lyrics quote (still two). Every step
+    is best-effort. Returns the sent audio ``Message`` (for ``file_id``
+    capture) or None.
     """
     display_title = (title or "Suno")[:64]
+    thumb_bytes = await _fetch_thumbnail(image_url) if image_url else None
+    thumbnail = (
+        BufferedInputFile(thumb_bytes, "cover.jpg") if thumb_bytes else None
+    )
 
-    # 1. Visible cover photo.
+    # 1. Cover photo carrying title + style + lyrics (collapsible).
+    cover_sent = False
     if image_url:
-        cap = f"🎵 <b>{html.escape(title or 'Песня')}</b>"
-        if style:
-            cap += f"\n🎨 <i>{html.escape(style[:120])}</i>"
         try:
-            await bot.send_photo(chat_id, photo=image_url, caption=cap)
+            await bot.send_photo(
+                chat_id,
+                photo=image_url,
+                caption=build_photo_caption(title, style, lyrics),
+            )
+            cover_sent = True
         except Exception as exc:  # noqa: BLE001
             log.warning(
                 "deliver_song cover send failed (chat %s, url=%s): %s",
@@ -878,12 +914,8 @@ async def deliver_song(
                 exc,
             )
 
-    # 2. Audio with a short caption + (optional) thumbnail.
+    # 2. Audio (short caption + optional thumbnail).
     caption = build_song_caption(title, style, None)
-    thumb_bytes = await _fetch_thumbnail(image_url) if image_url else None
-    thumbnail = (
-        BufferedInputFile(thumb_bytes, "cover.jpg") if thumb_bytes else None
-    )
     sent = None
     try:
         sent = await bot.send_audio(
@@ -912,8 +944,9 @@ async def deliver_song(
                     f"🔗 <a href=\"{html.escape(audio_ref)}\">Скачать mp3</a>",
                 )
 
-    # 3. Lyrics as a collapsible quote.
-    if lyrics:
+    # 3. Lyrics as a separate quote ONLY when they didn't ride on the
+    # cover photo's caption (keeps the total at two messages).
+    if lyrics and not cover_sent:
         with contextlib.suppress(Exception):
             await bot.send_message(
                 chat_id,
