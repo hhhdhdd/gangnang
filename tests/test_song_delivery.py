@@ -51,3 +51,20 @@ def test_make_thumbnail_resizes_to_jpeg():
 
 def test_make_thumbnail_bad_bytes_returns_none():
     assert _make_thumbnail(b"not an image") is None
+
+
+def test_lyrics_quote_is_expandable_blockquote():
+    from app.services.song_pipeline import _lyrics_quote
+
+    q = _lyrics_quote("[Verse]\nline one\nline two")
+    assert q.startswith("<blockquote expandable>")
+    assert q.endswith("</blockquote>")
+    assert "line one" in q
+
+
+def test_lyrics_quote_truncates_long():
+    from app.services.song_pipeline import _lyrics_quote
+
+    q = _lyrics_quote("x" * 9000)
+    # capped well under Telegram's 4096-char message limit
+    assert len(q) < 4096
