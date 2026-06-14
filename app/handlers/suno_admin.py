@@ -53,6 +53,7 @@ from app.services.suno import (
     mask_key,
     refresh_all_credits,
     remove_key,
+    set_active_key,
     set_api_key,
     set_model,
     set_target_duration_sec,
@@ -212,8 +213,9 @@ async def _build_keys_view(session: AsyncSession) -> tuple[str, object]:
                 f"· {cred} кр"
             )
         lines.append(
-            "\n<i>Активный кончится → бот сам переключится на резерв. "
-            "Порог переключения — 10 кредитов.</i>"
+            "\n<i>Тапни по ключу — сделать активным (и включить, если был "
+            "выключен). Активный кончится → бот сам переключится на резерв "
+            "(порог 10 кредитов, и сразу при ошибке «нет кредитов»).</i>"
         )
         text = "\n".join(lines)
     return text, suno_keys_keyboard(keys)
@@ -234,14 +236,27 @@ async def cb_suno_keys(
     await callback.answer()
 
 
-@router.callback_query(F.data == "suno:key_info")
-async def cb_suno_key_info(callback: CallbackQuery) -> None:
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("suno:key_info:"))
-async def cb_suno_key_info_id(callback: CallbackQuery) -> None:
-    await callback.answer("Это ключ из пула. 🗑 рядом — удалить.", show_alert=False)
+@router.callback_query(F.data.startswith("suno:key_use:"))
+async def cb_suno_key_use(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    """Manually make a key active (and re-enable it). Lets the owner
+    override rotation / retry a topped-up or auto-disabled key."""
+    if not await _require_admin(callback, session):
+        return
+    try:
+        key_id = int((callback.data or "").split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+    ok = await set_active_key(session, key_id)
+    await callback.answer("✅ Сделан активным" if ok else "Не найден")
+    text, kb = await _build_keys_view(session)
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(
+                text, reply_markup=kb, disable_web_page_preview=True
+            )
 
 
 @router.callback_query(F.data.startswith("suno:key_del:"))

@@ -97,7 +97,7 @@ def suno_keys_keyboard(keys) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text=f"{marker} {label}{mask_key(k.api_key)} · {cred}кр"[:64],
-                    callback_data=f"suno:key_info:{k.id}",
+                    callback_data=f"suno:key_use:{k.id}",
                 ),
                 InlineKeyboardButton(
                     text="🗑",

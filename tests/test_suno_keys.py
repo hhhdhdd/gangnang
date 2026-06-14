@@ -112,3 +112,20 @@ async def test_clear_removes_all(session):
     assert await clear_api_key(session) is True
     assert await list_keys(session) == []
     assert await get_active_key(session) is None
+
+
+@pytest.mark.asyncio
+async def test_set_active_key_manual_override_reenables(session):
+    from app.services.suno import set_active_key, set_key_credits
+
+    a = await add_key(session, "active-one")
+    b = await add_key(session, "dead-but-wanted")
+    # b auto-disabled at 0 credits
+    await set_key_credits(session, b.id, 0)
+    assert (await session.get(SunoKey, b.id)).enabled is False
+    # owner manually picks b -> it becomes active AND re-enabled
+    assert await set_active_key(session, b.id) is True
+    refreshed = await session.get(SunoKey, b.id)
+    assert refreshed.is_active is True
+    assert refreshed.enabled is True
+    assert (await _active(session)).api_key == "dead-but-wanted"
