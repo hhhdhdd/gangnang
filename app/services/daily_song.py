@@ -35,6 +35,7 @@ from app.services.song_pipeline import (
     SongPipelineError,
     TASK_POLL_INTERVAL_SEC,
     TASK_TIMEOUT_SEC,
+    _lyrics_quote,
     deliver_song,
     generate_song_draft,
 )
@@ -261,7 +262,7 @@ async def _fallback_lyrics(bot: Bot, chat_id: int, draft: SongDraft) -> None:
         with contextlib.suppress(Exception):
             await bot.send_message(
                 chat_id,
-                f"<pre>{html.escape(draft.lyrics)[:3500]}</pre>",
+                _lyrics_quote(draft.lyrics),
                 disable_web_page_preview=True,
             )
 
