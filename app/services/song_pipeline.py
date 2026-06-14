@@ -71,6 +71,7 @@ from app.services.suno import (
     SunoApiOrgClient,
     TaskSnapshot,
     format_duration_label,
+    generate_with_rotation,
     get_api_key as get_suno_api_key,
     get_callback_url,
     get_model as get_suno_model,
@@ -629,9 +630,10 @@ async def start_song_generation(
     )
 
     # Suno submit (customMode so we control title / style / lyrics).
-    suno_client = SunoApiOrgClient(bundle.suno_key)
+    # Rotation-aware: switches keys if the active one is out of credits.
     try:
-        task_id = await suno_client.generate_music(
+        task_id, _used_key = await generate_with_rotation(
+            session,
             prompt=bundle.draft.lyrics,
             model=bundle.suno_model,
             callback_url=bundle.callback_url,
@@ -724,9 +726,9 @@ async def start_song_from_prompt(
         style_override=style_override,
     )
 
-    suno_client = SunoApiOrgClient(suno_key)
     try:
-        task_id = await suno_client.generate_music(
+        task_id, _used_key = await generate_with_rotation(
+            session,
             prompt=draft.lyrics,
             model=suno_model,
             callback_url=callback_url,

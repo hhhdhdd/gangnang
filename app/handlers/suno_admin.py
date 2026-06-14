@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.keyboards.suno import (
     suno_back_keyboard,
     suno_duration_keyboard,
+    suno_keys_keyboard,
     suno_menu_keyboard,
     suno_model_keyboard,
     suno_remove_key_confirm_keyboard,
@@ -39,14 +40,19 @@ from app.services.suno import (
     SUPPORTED_MODELS,
     SunoApiError,
     SunoApiOrgClient,
+    add_key,
     append_duration_hint,
     clear_api_key,
     format_duration_label,
+    generate_with_rotation,
     get_api_key,
     get_callback_url,
     get_model,
     get_target_duration_sec,
+    list_keys,
     mask_key,
+    refresh_all_credits,
+    remove_key,
     set_api_key,
     set_model,
     set_target_duration_sec,
@@ -106,23 +112,37 @@ async def cb_suno_home(
 
 
 async def _build_menu(session: AsyncSession) -> tuple[str, object]:
-    api_key = await get_api_key(session)
+    keys = await list_keys(session)
     model = await get_model(session)
     callback_url = await get_callback_url(session)
     target_duration = await get_target_duration_sec(session)
 
-    masked = mask_key(api_key)
-    if api_key:
-        status_line = f"🟢 <b>API-ключ задан</b> · <code>{html.escape(masked)}</code>"
+    enabled = [k for k in keys if k.enabled]
+    active = next((k for k in keys if k.is_active and k.enabled), None)
+
+    if keys:
+        active_part = (
+            f"<code>{html.escape(mask_key(active.api_key))}</code>"
+            if active is not None
+            else "—"
+        )
+        status_line = (
+            f"🟢 <b>Ключей в пуле: {len(keys)}</b> "
+            f"(активных: {len(enabled)})\n"
+            f"▶️ Активный: {active_part}"
+        )
         hint = (
-            "Открой «🧪 Тестовая генерация», чтобы прогнать пайплайн на одной "
-            "короткой подсказке и убедиться, что всё работает."
+            "Несколько ключей ротируются автоматически: когда у активного "
+            "кредиты падают ниже 10 (или кончаются совсем), бот переключается "
+            "на следующий. Кредиты обновляются каждые 30 минут.\n\n"
+            "«🔑 Ключи» — добавить/удалить, «💰 Кредиты» — баланс активного."
         )
     else:
-        status_line = "🔴 <b>API-ключ не задан</b>"
+        status_line = "🔴 <b>Нет ни одного API-ключа</b>"
         hint = (
             "Возьми ключ на <a href=\"https://sunoapi.org/api-key\">"
-            "sunoapi.org/api-key</a> и нажми «🔑 Задать API-ключ»."
+            "sunoapi.org/api-key</a> и нажми «🔑 Добавить API-ключ». "
+            "Можно добавить несколько — они будут ротироваться."
         )
 
     text = (
@@ -131,12 +151,11 @@ async def _build_menu(session: AsyncSession) -> tuple[str, object]:
         f"🎚 Модель по умолчанию: <code>{html.escape(model)}</code>\n"
         f"🎯 Целевая длительность: <code>"
         f"{format_duration_label(target_duration)}</code> "
-        f"(~{target_duration} сек)\n"
-        f"🔁 Callback URL: <code>{html.escape(callback_url)}</code>\n\n"
+        f"(~{target_duration} сек)\n\n"
         f"{hint}"
     )
     kb = suno_menu_keyboard(
-        has_api_key=bool(api_key),
+        key_count=len(keys),
         current_model=model,
         target_duration_sec=target_duration,
     )
@@ -145,7 +164,7 @@ async def _build_menu(session: AsyncSession) -> tuple[str, object]:
 
 # ---------- API key: set ----------
 
-@router.callback_query(F.data == "suno:set_key")
+@router.callback_query(F.data.in_({"suno:set_key", "suno:key_add"}))
 async def cb_suno_set_key(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ) -> None:
@@ -154,17 +173,115 @@ async def cb_suno_set_key(
     await state.set_state(SunoApiKeyEditing.waiting_key)
     if isinstance(callback.message, Message):
         await callback.message.edit_text(
-            "🔑 <b>API-ключ Suno</b>\n\n"
+            "🔑 <b>Добавить API-ключ Suno</b>\n\n"
             "Пришли ключ одним сообщением. Получить ключ можно тут:\n"
             "<a href=\"https://sunoapi.org/api-key\">"
             "sunoapi.org/api-key</a>\n\n"
-            "Я сразу проверю его звонком к API (запросом баланса) и "
-            "удалю это сообщение из истории, чтобы ключ не светился.\n\n"
-            "Или /cancel.",
+            "Можно добавить несколько ключей — они будут ротироваться, "
+            "когда у активного кончаются кредиты.\n\n"
+            "Я сразу проверю ключ запросом баланса и удалю это сообщение "
+            "из истории, чтобы ключ не светился. Или /cancel.",
             reply_markup=suno_back_keyboard(),
             disable_web_page_preview=True,
         )
     await callback.answer()
+
+
+# ---------- keys pool: list / remove / refresh ----------
+
+async def _build_keys_view(session: AsyncSession) -> tuple[str, object]:
+    keys = await list_keys(session)
+    if not keys:
+        text = (
+            "🔑 <b>Ключи Suno</b>\n\n"
+            "Пул пуст. Добавь первый ключ — потом можно докинуть ещё "
+            "для ротации."
+        )
+    else:
+        lines = ["🔑 <b>Ключи Suno</b> (ротация по кредитам)\n"]
+        for k in keys:
+            if k.is_active:
+                marker = "✅ активный"
+            elif not k.enabled:
+                marker = "🔴 выключен (0 кредитов)"
+            else:
+                marker = "▫️ резерв"
+            cred = "?" if k.last_credits is None else str(k.last_credits)
+            lines.append(
+                f"{marker} · <code>{html.escape(mask_key(k.api_key))}</code> "
+                f"· {cred} кр"
+            )
+        lines.append(
+            "\n<i>Активный кончится → бот сам переключится на резерв. "
+            "Порог переключения — 10 кредитов.</i>"
+        )
+        text = "\n".join(lines)
+    return text, suno_keys_keyboard(keys)
+
+
+@router.callback_query(F.data == "suno:keys")
+async def cb_suno_keys(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    text, kb = await _build_keys_view(session)
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(
+                text, reply_markup=kb, disable_web_page_preview=True
+            )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "suno:key_info")
+async def cb_suno_key_info(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("suno:key_info:"))
+async def cb_suno_key_info_id(callback: CallbackQuery) -> None:
+    await callback.answer("Это ключ из пула. 🗑 рядом — удалить.", show_alert=False)
+
+
+@router.callback_query(F.data.startswith("suno:key_del:"))
+async def cb_suno_key_del(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    try:
+        key_id = int((callback.data or "").split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+    removed = await remove_key(session, key_id)
+    await callback.answer("🗑 Удалён" if removed else "Не найден")
+    text, kb = await _build_keys_view(session)
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(
+                text, reply_markup=kb, disable_web_page_preview=True
+            )
+
+
+@router.callback_query(F.data == "suno:keys_refresh")
+async def cb_suno_keys_refresh(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    if not await _require_admin(callback, session):
+        return
+    await callback.answer("🔄 Проверяю баланс ключей…")
+    try:
+        await refresh_all_credits(session)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("manual suno credit refresh failed: %s", exc)
+    text, kb = await _build_keys_view(session)
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(
+                text, reply_markup=kb, disable_web_page_preview=True
+            )
 
 
 @router.message(
@@ -522,7 +639,8 @@ async def receive_test_prompt(
 
     client = SunoApiOrgClient(api_key)
     try:
-        task_id = await client.generate_music(
+        task_id, api_key = await generate_with_rotation(
+            session,
             prompt=final_prompt,
             model=model,
             callback_url=callback_url,

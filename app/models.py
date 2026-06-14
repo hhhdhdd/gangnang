@@ -296,3 +296,38 @@ class DailySong(Base):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class SunoKey(Base):
+    """One sunoapi.org API key in the rotation pool.
+
+    Multiple keys let the bot keep generating after a key's free credits
+    run out: exactly one key is ``is_active`` at a time, and the
+    credit-refresh job (``app/scheduler.py``) flips to the next
+    ``enabled`` key when the active one drops below the low-credit
+    threshold. ``last_credits`` / ``last_checked_at`` cache the last
+    balance read so proactive rotation doesn't need a network call on
+    every generation.
+    """
+
+    __tablename__ = "suno_keys"
+    __table_args__ = (
+        UniqueConstraint("api_key", name="uq_suno_keys_api_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    api_key: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+    last_credits: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
